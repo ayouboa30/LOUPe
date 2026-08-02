@@ -15,11 +15,17 @@ chat's avatar (see web/assets/mascot_*.png and MASCOT_ASPECT in
 web/app.js) - real alpha transparency baked into the files, no procedural
 approximation.
 
-Hovering the mascot also fades in two action icons to its right - a mic
-(one-shot voice question) and a magnifying glass (screen capture + OCR +
-question) - each running its request against the local engine on a
-background thread and finishing with a Windows tray toast, so the flow
-never blocks or steals focus from whatever the user is doing.
+Hovering the mascot fades in two action icons to its right: a mic (one-shot
+voice question) and a magnifying glass (capture the screen, OCR it, and have
+the model explain what is on it). Both run against the local engine on a
+background thread and finish with a Windows tray toast, so neither blocks
+nor steals focus from what the user is doing.
+
+The magnifying glass also puts the mascot into *scan mode*: glass raised,
+tail swishing, sweeping left and right across the screen until the answer
+comes back. The sweep is cosmetic - the screenshot is taken instantly - but
+without it a multi-second OCR and model round trip is indistinguishable
+from the widget having frozen.
 """
 
 from __future__ import annotations
@@ -38,7 +44,7 @@ from PIL import Image, ImageDraw
 
 from . import notify
 from .assistant_actions import (
-    ask_follow_up_question,
+    build_screen_reading_prompt,
     capture_and_ocr,
     listen_and_transcribe,
     run_prompt_in_background,
@@ -219,6 +225,13 @@ class NativeWidget:
         self._flip_horizontally = False  # rotate toward mouse
         self._eye_blink = 0.0  # 0-1 animation for eye blink
         self._tail_swing = 0.0  # 0-1 for tail swing during drag
+        # Scan mode: the mascot holds its magnifying glass up and sweeps
+        # across the screen while the OCR request is in flight. The sweep is
+        # cosmetic - the screenshot is instantaneous - but it is what makes
+        # the wait legible instead of the app appearing to have frozen.
+        self._scanning = False
+        self._scan_started_at = 0.0
+        self._scan_origin: tuple[int, int] | None = None
 
         sprite_w = max(f[1] for f in self._frames)
         sprite_h = max(f[2] for f in self._frames)
@@ -296,9 +309,10 @@ class NativeWidget:
 
         # Ease the magnifying glass (and the action icons' fade-in) over
         # ~0.5s instead of snapping, mirroring the web avatar's CSS
-        # steps() hover animation.
+        # steps() hover animation. While scanning the glass stays fully
+        # raised regardless of where the pointer is.
         last_frame = len(self._frames) - 1
-        target = last_frame if self._hovering else 0.0
+        target = last_frame if (self._hovering or self._scanning) else 0.0
         step = last_frame / 15.0
         if self._glass_progress < target:
             self._glass_progress = min(target, self._glass_progress + step)
@@ -319,16 +333,59 @@ class NativeWidget:
         else:
             self._eye_blink = 0.0
 
-        # Tail swing during drag: oscillates side-to-side
-        if self._dragging:
+        # Tail swing: oscillates while dragging, and while scanning - the
+        # mascot reads as busy rather than stuck.
+        if self._dragging or self._scanning:
             self._tail_swing = 0.5 + 0.5 * math.sin(elapsed * 4.0)
         else:
             self._tail_swing = 0.5
+
+        if self._scanning:
+            self._advance_scan()
 
         pixels, width, height = self._frames[frame_index]
         if self._flip_horizontally:
             pixels = self._flip_pixels_horizontal(pixels, width, height)
         self._blit(pixels, width, height, bob)
+
+    #: One full left-right-left sweep of the screen, in seconds.
+    _SCAN_PERIOD = 2.4
+
+    def _advance_scan(self) -> None:
+        """Sweep the mascot across the screen while a capture is processed.
+
+        Purely cosmetic: the screenshot is taken instantly at the start. The
+        motion exists so a multi-second OCR + model round trip looks like
+        work in progress rather than a frozen widget. The window returns to
+        where the user had put it once the scan ends.
+        """
+
+        if self._scan_origin is None:
+            return
+        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        travel = max(0, screen_w - self._canvas_w - 40)
+        phase = ((time.time() - self._scan_started_at) / self._SCAN_PERIOD) % 1.0
+        # Triangle wave: 0 -> 1 -> 0, so the sweep reverses instead of
+        # teleporting back to the left edge.
+        ratio = 2 * phase if phase < 0.5 else 2 * (1 - phase)
+        # Ease in/out so the reversals are not abrupt.
+        eased = ratio * ratio * (3 - 2 * ratio)
+        user32.SetWindowPos(
+            self._hwnd, None,
+            20 + int(travel * eased), self._scan_origin[1],
+            0, 0, 0x0001 | 0x0004,  # NOSIZE | NOZORDER
+        )
+
+    def _end_scan(self) -> None:
+        """Stop sweeping and put the widget back where the user left it."""
+
+        self._scanning = False
+        if self._scan_origin is not None and self._hwnd is not None:
+            user32.SetWindowPos(
+                self._hwnd, None, self._scan_origin[0], self._scan_origin[1],
+                0, 0, 0x0001 | 0x0004,
+            )
+        self._scan_origin = None
 
     @staticmethod
     def _flip_pixels_horizontal(pixels: bytes, width: int, height: int) -> bytes:
@@ -493,25 +550,46 @@ class NativeWidget:
         threading.Thread(target=worker, daemon=True).start()
 
     def _start_ocr_flow(self) -> None:
+        """Capture the screen, read it, and have the model explain it.
+
+        No question is asked. An earlier version opened a text dialog first,
+        which is where the flow died in practice: the dialog could land
+        behind the other windows, and cancelling it left the mascot busy
+        with nothing on screen to explain why. Reading what is on screen is
+        unambiguous enough to act on directly.
+        """
+
         if self._busy or self._port is None:
             return
         self._busy = True
 
+        rect = wintypes.RECT()
+        user32.GetWindowRect(self._hwnd, ctypes.byref(rect))
+        self._scan_origin = (rect.left, rect.top)
+        self._scan_started_at = time.time()
+        self._scanning = True
+
         def worker() -> None:
             try:
                 ocr_text = capture_and_ocr()
-                question = ask_follow_up_question(ocr_text)
             except Exception as exc:
+                self._end_scan()
                 self._notify(f"Erreur OCR: {exc}")
                 self._busy = False
                 return
-            if not question:
+            prompt = build_screen_reading_prompt(ocr_text)
+            if prompt is None:
+                self._end_scan()
+                self._notify("Aucun texte lisible n'a ete trouve a l'ecran.")
                 self._busy = False
                 return
-            prompt = f"Texte capture a l'ecran:\n{ocr_text}\n\nQuestion: {question}"
-            run_prompt_in_background(prompt, port=self._port, on_done=self._finish_prompt)
+            run_prompt_in_background(prompt, port=self._port, on_done=self._finish_scan)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_scan(self, answer: str, success: bool) -> None:
+        self._end_scan()
+        self._finish_prompt(answer, success)
 
     def _wndproc(self, hwnd: wintypes.HWND, msg: int, wparam: int, lparam: int) -> int:
         if msg == WM_TIMER:

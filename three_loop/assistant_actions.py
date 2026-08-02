@@ -28,6 +28,8 @@ from typing import Any, Callable
 
 from PIL import ImageGrab
 
+from .compact import compact_text
+
 _LAST_CONFIG_PATH = Path.home() / ".3loop" / "last_run_config.json"
 
 
@@ -67,6 +69,76 @@ def capture_and_ocr() -> str:
         return result.text
 
     return asyncio.run(_run())
+
+
+#: A full-screen OCR pass returns everything: window titles, the taskbar,
+#: menu labels. At ~14 ms per prompt token that noise costs real time, so the
+#: text is compacted and capped before it reaches the model.
+_SCREEN_TEXT_MAX_TOKENS = 900
+
+#: Below this, the capture is menu chrome rather than content worth reading.
+_MIN_USEFUL_CHARS = 40
+
+
+def compact_screen_text(ocr_text: str, *, max_tokens: int = _SCREEN_TEXT_MAX_TOKENS) -> str:
+    """Compact an OCR capture, keeping the *top* of the screen.
+
+    Two things differ from the generic ``compact_text`` and both matter:
+
+    * **Keep the head, not the tail.** OCR returns text roughly top to
+      bottom, so the content the user is looking at comes first and the
+      taskbar/status bar comes last. Trimming from the front - which is
+      right for a conversation history - throws away exactly the part worth
+      explaining. Measured on a capture containing a Python traceback: the
+      generic trimmer dropped the exception entirely.
+    * **Deduplicate lines.** A full-screen grab repeats menu labels, tab
+      titles and taskbar entries; the same fragment can appear a dozen
+      times and each copy costs prompt tokens for nothing.
+    """
+
+    cleaned = compact_text(ocr_text or "")
+    seen: set[str] = set()
+    kept: list[str] = []
+    budget = int(max_tokens * 3.6)  # ~chars per token for this tokenizer family
+    used = 0
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if used + len(line) + 1 > budget:
+            kept.append("[...bas de l'ecran omis...]")
+            break
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
+
+
+def build_screen_reading_prompt(ocr_text: str) -> str | None:
+    """Turn raw OCR output into a prompt asking the model to explain it.
+
+    Returns ``None`` when the capture holds nothing worth sending, so the
+    caller can say so instead of asking the model to comment on an empty
+    screen.
+    """
+
+    compacted = compact_screen_text(ocr_text or "")
+    if len(compacted) < _MIN_USEFUL_CHARS:
+        return None
+    return (
+        "Voici le texte lu a l'ecran de l'utilisateur par OCR. Il est brut, "
+        "non ordonne, et melange le contenu utile avec des elements "
+        "d'interface (titres de fenetres, menus, barre des taches).\n\n"
+        f"---\n{compacted}\n---\n\n"
+        "Explique ce qui est affiche: de quoi il s'agit, ce que la personne "
+        "est en train de faire, et le point important a en retenir. Ignore "
+        "les elements d'interface. Si quelque chose demande une action ou "
+        "signale une erreur, dis-le en premier. Reponds en francais, de "
+        "maniere concise."
+    )
 
 
 def listen_and_transcribe(timeout_seconds: float = 12.0) -> str:
@@ -141,20 +213,3 @@ def run_prompt_in_background(
     threading.Thread(target=_worker, daemon=True).start()
 
 
-def ask_follow_up_question(initial_text: str) -> str | None:
-    """Small native text-entry dialog for the question that goes with an OCR capture."""
-
-    import tkinter as tk
-    from tkinter import simpledialog
-
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes("-topmost", True)
-    try:
-        return simpledialog.askstring(
-            "3loop",
-            f"Texte capture ({len(initial_text)} caracteres). Ta question :",
-            parent=root,
-        )
-    finally:
-        root.destroy()
