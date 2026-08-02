@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>3loop</title>
+<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="vendor/katex/katex.min.css" />
+</head>
+<body>
+<div class="app">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span id="brand-badge" class="brand-badge"></span>
+      <span class="brand-name">3loop</span>
+    </div>
+
+    <button id="new-chat" class="btn-new-chat">+ Nouvelle conversation</button>
+
+    <div class="side-section">
+      <label>Backend</label>
+      <select id="backend-select"></select>
+    </div>
+
+    <div class="side-section" id="api-key-section" hidden>
+      <label>Clé API (gratuite)</label>
+      <input id="api-key" type="password" placeholder="Colle ta clé ici" />
+      <a id="signup-link" class="hint-link" href="#" target="_blank" rel="noopener"></a>
+    </div>
+
+    <div class="side-section" id="model-section">
+      <label>Modèle</label>
+      <select id="model-select"></select>
+    </div>
+
+    <p id="backend-hint" class="hint"></p>
+
+    <label class="switch-row">
+      <input id="research-toggle" type="checkbox" />
+      <span>Recherche web triangulée</span>
+    </label>
+
+    <details class="side-section advanced">
+      <summary>Paramètres avancés</summary>
+      <label>Cycles maximum <span id="cycles-value">2</span></label>
+      <input id="cycles-range" type="range" min="1" max="8" value="2" />
+      <label>Longueur max (tokens) <span id="tokens-value">256</span></label>
+      <input id="tokens-range" type="range" min="64" max="4096" step="64" value="256" />
+      <label>Type de sortie</label>
+      <select id="kind-select">
+        <option value="auto">Automatique</option>
+        <option value="code">Code</option>
+        <option value="math">Mathématiques</option>
+        <option value="general">Général</option>
+      </select>
+    </details>
+  </aside>
+
+  <main class="chat">
+    <div id="messages" class="messages">
+      <div class="empty-state">
+        <div id="empty-badge" class="empty-badge"></div>
+        <h1>3loop</h1>
+        <p>Heuristique → Critique → Rédacteur → Vote de consensus.<br/>Pose une question de code, de maths, ou une recherche.</p>
+      </div>
+    </div>
+
+    <form id="composer" class="composer">
+      <textarea id="prompt-input" rows="1" placeholder="Écris ton message…"></textarea>
+      <button id="send-btn" type="submit" aria-label="Envoyer">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 11.5 21 3l-7 18-3-7-8-2.5Z"/></svg>
+      </button>
+    </form>
+  </main>
+
+  <aside class="side-panel">
+    <div class="panel-card">
+      <h4>Sorties</h4>
+      <div id="panel-status" class="muted">Aucune exécution pour l'instant.</div>
+    </div>
+    <div class="panel-card">
+      <h4>Sources</h4>
+      <div id="panel-sources" class="muted">Aucune source pour l'instant.</div>
+    </div>
+    <div class="panel-card">
+      <h4>Détail du débat</h4>
+      <div id="panel-debate" class="muted">Rien à afficher pour l'instant.</div>
+    </div>
+    <div class="panel-card">
+      <h4>Prior de température</h4>
+      <svg id="temp-chart" viewBox="0 0 260 110" class="temp-chart"></svg>
+    </div>
+  </aside>
+
+</div>
+<script src="vendor/katex/katex.min.js"></script>
+<script src="vendor/katex/auto-render.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

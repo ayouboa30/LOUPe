@@ -1,0 +1,48 @@
+# Build artefacts -------------------------------------------------------
+# PyInstaller emits a ~350 MB tree here (torch, cv2, llama_cpp, ...).
+# It is fully reproducible from build_exe.ps1 and must never be committed.
+build/
+dist/
+*.spec
+*.manifest
+
+# Python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Model weights ---------------------------------------------------------
+# GGUF files run to gigabytes; ship a download step, never the weights.
+*.gguf
+*.bin
+*.safetensors
+models/
+
+# Secrets and local state -----------------------------------------------
+# The app persists the last backend selection (which can carry an API key)
+# under ~/.3loop; this guards against anyone relocating it into the tree.
+.env
+.env.*
+*.key
+*.pem
+api_keys.json
+last_run_config.json
+
+# Runtime output --------------------------------------------------------
+3loop_crash.log
+*.log
+
+# OS / editor -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
