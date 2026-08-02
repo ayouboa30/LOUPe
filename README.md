@@ -1,141 +1,137 @@
 # 3loop
 
-`3loop` est un framework Python asynchrone de débat multi-agents pour la génération de code et la résolution mathématique. Chaque cycle exécute trois identités séquentielles sur un backend LLM partagé:
+Framework Python asynchrone de débat multi-agents, livré comme application
+de bureau Windows. Chaque cycle exécute trois identités sur un backend LLM
+partagé :
 
-1. **Heuristique**: propose un sketch, une preuve ou un algorithme.
-2. **Critique**: cherche les hypothèses cachées, les erreurs et les cas limites.
-3. **Rédacteur**: intègre les corrections et produit le code ou le LaTeX final.
+1. **Heuristique** — propose une esquisse, une preuve ou un algorithme.
+2. **Critique** — cherche les hypothèses cachées, les erreurs, les cas limites.
+3. **Rédacteur** — intègre les corrections et produit la réponse finale.
 
-Les trois agents votent ensuite indépendamment sur la solution finale. Une majorité absolue de deux votes arrête la boucle; sinon l’historique complet est réinjecté dans le cycle suivant.
+Les trois votent ensuite indépendamment. Une majorité de deux arrête la
+boucle ; sinon l'historique est réinjecté dans le cycle suivant.
 
-## Installation
+Deux rôles de support ne votent pas : **Contexte** distille ce qui est
+transmis d'un cycle à l'autre, **Chercheur** résume les résultats web avant
+qu'ils n'atteignent le débat.
 
-Le cœur n’a aucune dépendance obligatoire:
-
-```bash
-cd 3loop
-python -m pip install -e ".[dev]"
-```
-
-Extras disponibles:
-
-```bash
-python -m pip install -e ".[ui,web]"       # Streamlit + recherche DDG
-python -m pip install -e ".[llama]"         # llama-cpp-python local
-python -m pip install -e ".[litellm]"       # LiteLLM
-```
-
-## Démarrage rapide hors ligne
-
-```bash
-cd 3loop
-python -m three_loop "Implementer une fonction Python de recherche binaire" --cycles 4
-```
-
-Le `DemoBackend` sert aux tests et à la démonstration. Il est remplaçable par `LlamaCppBackend` ou `LiteLLMBackend`; les trois agents reçoivent exactement le même objet backend. L’adaptateur Llama protège l’objet `Llama` par un verrou asynchrone et déporte l’inférence bloquante dans un thread.
-
-## Interface Streamlit
-
-```bash
-cd 3loop
-streamlit run app.py
-```
-
-Pour une utilisation sans installer Python ni taper de commande, construire le lanceur Windows:
+## Application de bureau
 
 ```powershell
-cd 3loop
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
-Le fichier `dist\3loop.exe` démarre le serveur local et ouvre automatiquement `http://localhost:8501`. Le premier lancement peut prendre quelques secondes, car l’EXE extrait ses dépendances dans un dossier temporaire.
+Produit `dist\3loop\3loop.exe` (mode `--onedir` : le `--onefile` ré-extrayait
+~350 Mo à chaque lancement). L'app ouvre une fenêtre WebView2 et une
+mascotte flottante — clic gauche pour ouvrir l'app, clic droit pour la
+fermer, et au survol deux actions : micro (dictée hors ligne) et loupe
+(capture d'écran + OCR).
 
-L’interface affiche les sorties Agent 1 -> Agent 2 -> Agent 3, les votes, les sources triangulées et l’évolution de la moyenne de température de chaque posterior.
+## Backends
 
-## API minimale
+| backend | usage |
+|---|---|
+| **OpenCode** | délègue à un modèle frontière via la CLI OpenCode installée |
+| **iGPU local** | Vulkan sur le GPU intégré (voir CPU_PERFORMANCE.md) |
+| **GGUF local** | llama-cpp-python, poids chargés directement |
+| **Ollama** | serveur Ollama classique |
+| Groq / NVIDIA | API cloud gratuites |
+| Démo | réponses simulées, aucune installation |
+
+## Installation en bibliothèque
+
+Le cœur n'a aucune dépendance obligatoire :
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Extras : `desktop` (app Windows), `web` (recherche DDG), `llama`
+(llama-cpp-python), `litellm`, `airllm`.
+
+## Utilisation en ligne de commande
+
+```bash
+python -m three_loop "Implementer une recherche binaire en Python" --cycles 4
+```
+
+## API
 
 ```python
 import asyncio
-
-from three_loop import DemoBackend, PipelineConfig, TemperatureOptimizer, ThreeLoopPipeline
-
+from three_loop import DemoBackend, PipelineConfig, ThreeLoopPipeline
 
 async def main() -> None:
     pipeline = ThreeLoopPipeline(
         DemoBackend(),
-        optimizer=TemperatureOptimizer(seed=42),
-        config=PipelineConfig(max_cycles=5),
+        config=PipelineConfig(max_cycles=3, compact_debate=True),
     )
-    result = await pipeline.run(
-        "Prouver que la somme de deux nombres pairs est paire",
-        kind="math",
-    )
+    result = await pipeline.run("Prouver que la somme de deux pairs est paire")
     print(result.final_solution)
-
 
 asyncio.run(main())
 ```
 
-Pour le rendu en temps réel, consommer `pipeline.stream(...)` au lieu de `run(...)`:
+`pipeline.stream(...)` émet les événements au fil de l'eau plutôt que
+d'attendre le résultat final.
 
-```python
-async for event in pipeline.stream(task):
-    print(event.event_type, event.message)
-```
+**`compact_debate`** (actif par défaut) produit les trois contributions et
+les trois votes en **un seul appel** au lieu de six. C'est un partage de
+contexte et de cache KV, pas un transfert de vecteurs cachés entre rôles —
+ce dernier exigerait un modèle entraîné pour les accepter.
 
-Pour réduire fortement la latence, activer le mode compact:
-
-```python
-pipeline = ThreeLoopPipeline(
-    DemoBackend(),
-    config=PipelineConfig(max_cycles=3, compact_debate=True),
-)
-```
-
-Ce mode réalise un appel par cycle: le même contexte autoregressif produit les trois artefacts et les trois votes. Il s’agit d’un partage de contexte/KV-cache, pas d’un transfert arbitraire de vecteurs cachés entre rôles; ce dernier nécessiterait un modèle entraîné pour accepter ces états.
+**`lazy_debate_fields`** (actif par défaut) ne génère pas les champs qui
+n'alimentent que le panneau latéral : 65 % des tokens produits, jamais lus.
+Mesuré −29 % de latence *et* une réponse deux fois plus longue, le budget
+allant entièrement au texte visible.
 
 ## Température bayésienne
 
-`TemperatureOptimizer` maintient un prior Beta indépendant par identité. Avec les valeurs par défaut:
+`TemperatureOptimizer` maintient un prior Beta par identité :
 
 ```text
 T = 0.2 + Beta(alpha, beta) * (0.7 - 0.2)
 ```
 
-Après un cycle, une récompense `R` est transformée en pseudo-observations:
-
-```text
-alpha <- alpha + learning_rate * R
-beta  <- beta  + learning_rate * (1 - R)
-```
-
-La récompense par défaut combine le ratio de votes positifs, la validation syntaxique/structurelle et la vitesse d’obtention du consensus. Un `external_validator` ou un `reward_function` permet d’ajouter un signal métier.
+Après chaque cycle, la récompense `R` met à jour `alpha += lr * R` et
+`beta += lr * (1 - R)`. La récompense combine le ratio de votes positifs, la
+validation structurelle et la vitesse d'obtention du consensus. Un
+`external_validator` ou un `reward_function` ajoute un signal métier.
 
 ## Recherche triangulée
 
-Quand `research=True`, chaque rôle produit sa requête sans voir les requêtes des autres. `triangulate_sources` lance les recherches en parallèle et conserve les liens exacts vus par au moins deux agents; si les liens diffèrent, il conserve un représentant d’un domaine commun. Les erreurs d’un fournisseur sont isolées dans `WebResearchResult.errors`.
+Avec `research=True`, chaque rôle formule sa requête sans voir celles des
+autres. `triangulate_sources` ne conserve que les liens vus par au moins
+deux agents, ou un représentant d'un domaine commun. Les erreurs d'un
+fournisseur restent isolées dans `WebResearchResult.errors`.
 
-Un fournisseur externe respecte simplement le protocole:
+## Performance
 
-```python
-class MyProvider:
-    async def search(self, query: str, *, max_results: int = 5):
-        ...
-```
+[CPU_PERFORMANCE.md](CPU_PERFORMANCE.md) contient les mesures qui motivent
+les choix d'implémentation : analyse roofline de la machine, réutilisation
+du cache KV (9,4×), threads séparés pour prefill et décodage, offload iGPU,
+et les pistes testées **puis écartées** — décodage spéculatif, cascade
+brouillon/vérification, compaction par suppression de voyelles.
 
 ## Structure
 
 ```text
 three_loop/
-  three_loop/
-    agents.py       # trois identités et parseurs de votes
-    backend.py      # backend partagé, Llama.cpp, LiteLLM, demo
-    history.py      # transcript complet
-    models.py       # contrats et événements
-    pipeline.py     # boucle asynchrone et consensus
-    streamlit_app.py
-    temperature.py  # TemperatureOptimizer isolé
-    validation.py
-    web.py          # recherche et intersection robuste
-  tests/
+  agents.py            # les trois identités, parseurs de votes
+  backend.py           # backends partagés (llama.cpp, Ollama, cloud, demo)
+  opencode_backend.py  # délégation à la CLI OpenCode
+  igpu.py              # détection, serveur Vulkan géré, routage CPU/iGPU
+  latent.py            # débat compact en un appel, parsing tolérant
+  prompting.py         # préfixe partagé (réutilisation du cache KV)
+  support.py           # agents Contexte et Chercheur
+  pipeline.py          # boucle asynchrone et consensus
+  history.py           # transcript, rendu append-only
+  temperature.py       # optimiseur bayésien
+  web.py               # recherche et triangulation
+  server.py            # serveur HTTP+SSE local
+  native_widget.py     # mascotte flottante Win32
+  assistant_actions.py # micro (WinRT) et OCR
+web/                   # interface (HTML/CSS/JS, KaTeX embarqué)
+skills/                # règles de formatage par domaine
+tests/
 ```
