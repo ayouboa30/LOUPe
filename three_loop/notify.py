@@ -23,6 +23,15 @@ NIM_DELETE = 0x00000002
 NIIF_INFO = 0x00000001
 IDI_APPLICATION = 32512
 
+#: Message Shell_NotifyIconW sends back to `hWnd` on tray-icon/balloon mouse
+#: events (wParam=icon id, lParam=the actual event, e.g. WM_LBUTTONUP or
+#: NIN_BALLOONUSERCLICK). WM_APP+2 - clear of WM_APP+1, which the widget
+#: doesn't currently use but reserving distinct offsets avoids collisions if
+#: it grows more custom messages later.
+WM_TRAYICON = 0x8000 + 2
+NIN_BALLOONUSERCLICK = 0x0400 + 5
+WM_LBUTTONUP = 0x0202
+
 user32.LoadIconW.restype = wintypes.HICON
 user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
 shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
@@ -46,15 +55,21 @@ class _NOTIFYICONDATAW(ctypes.Structure):
     ]
 
 
-def show_toast(hwnd: int, title: str, message: str, *, icon_id: int = 1) -> None:
-    """Pop a Windows tray balloon, then remove the tray icon a few seconds later."""
+def show_toast(hwnd: int, title: str, message: str, *, icon_id: int = 1, clickable: bool = False) -> None:
+    """Pop a Windows tray balloon, then remove the tray icon a few seconds later.
+
+    ``clickable=True`` makes Windows deliver ``WM_TRAYICON`` to ``hwnd`` when
+    the user clicks the balloon or the tray icon itself - the caller's
+    ``_wndproc`` decides what that means (3loop's own widget opens the main
+    window on it, for the proactive research nudge).
+    """
 
     data = _NOTIFYICONDATAW()
     data.cbSize = ctypes.sizeof(_NOTIFYICONDATAW)
     data.hWnd = hwnd
     data.uID = icon_id
     data.uFlags = NIF_INFO | NIF_ICON | NIF_MESSAGE
-    data.uCallbackMessage = 0
+    data.uCallbackMessage = WM_TRAYICON if clickable else 0
     data.hIcon = user32.LoadIconW(None, ctypes.cast(ctypes.c_void_p(IDI_APPLICATION), wintypes.LPCWSTR))
     data.szTip = "3loop"
     data.szInfo = message[:255]

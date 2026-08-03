@@ -123,3 +123,38 @@ def test_mic_privacy_policy_error_gets_a_clear_actionable_message(monkeypatch) -
     except RuntimeError as exc:
         assert "reconnaissance vocale" in str(exc).lower()
         assert opened == [True]
+
+
+def test_run_prompt_in_background_fires_on_started_immediately(monkeypatch) -> None:
+    """Without this, a slow backend (a CLI agent measured at 20-65s per
+    call) is indistinguishable from the widget having silently done
+    nothing between the click and the eventual result toast - which is
+    exactly what a stale ~/.3loop/last_run_config.json (from unrelated
+    testing against a slow backend) surfaced as "plus reutilisable"."""
+
+    import threading
+
+    import three_loop.assistant_actions as aa
+
+    started = threading.Event()
+    finished = threading.Event()
+
+    monkeypatch.setattr(aa, "load_last_run_config", lambda: {"backend": "demo"})
+
+    class _FailFast:
+        def __enter__(self):
+            raise OSError("no server in this test - on_started must still fire first")
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(aa.urllib.request, "urlopen", lambda *a, **k: _FailFast())
+
+    aa.run_prompt_in_background(
+        "question", port=1,
+        on_done=lambda answer, ok: finished.set(),
+        on_started=started.set,
+    )
+
+    assert started.wait(timeout=2), "on_started was not called"
+    assert finished.wait(timeout=2), "on_done was not called after the failure"

@@ -255,6 +255,15 @@ class NativeWidget:
         # captured; this only covers the OCR+search+model time after that.
         self._busy_glass_raised = False
 
+        # Proactive research nudge: after IDLE_BEFORE_NUDGE of no mouse or
+        # keyboard input anywhere on the system, offer to start a research
+        # question. A declined (or ignored) offer is not repeated for
+        # NUDGE_COOLDOWN - "declined" has no explicit UI, so any offer shown
+        # starts the cooldown regardless of whether the user acts on it,
+        # which is what keeps this from nagging someone who is just reading
+        # or thinking rather than genuinely away from the keyboard.
+        self._last_nudge_at = 0.0
+
         sprite_w = max(f[1] for f in self._frames)
         sprite_h = max(f[2] for f in self._frames)
         self._sprite_w = sprite_w
@@ -483,7 +492,10 @@ class NativeWidget:
             if not text:
                 self._busy = False
                 return
-            run_prompt_in_background(text, port=self._port, on_done=self._finish_prompt)
+            run_prompt_in_background(
+                text, port=self._port, on_done=self._finish_prompt,
+                on_started=lambda: self._notify(f'Question envoyee : "{text[:60]}"'),
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -543,7 +555,10 @@ class NativeWidget:
             self._notify("Aucun texte lisible n'a ete trouve dans la selection.")
             self._busy = False
             return
-        run_prompt_in_background(prompt, port=self._port, on_done=self._finish_ocr)
+        run_prompt_in_background(
+            prompt, port=self._port, on_done=self._finish_ocr,
+            on_started=lambda: self._notify("Analyse en cours..."),
+        )
 
     def _finish_ocr(self, answer: str, success: bool) -> None:
         self._busy_glass_raised = False

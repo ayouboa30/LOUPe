@@ -287,10 +287,23 @@ def run_prompt_in_background(
     *,
     port: int,
     on_done: Callable[[str, bool], None],
+    on_started: Callable[[], None] | None = None,
 ) -> None:
-    """POST ``prompt`` to the local engine; call ``on_done(answer, success)`` once it's back."""
+    """POST ``prompt`` to the local engine; call ``on_done(answer, success)`` once it's back.
+
+    ``on_started`` fires the moment the request is dispatched, before any
+    network round trip. Without it, a slow-but-working backend (a CLI
+    coding agent measured at 20-65s per call, or a multi-cycle debate) is
+    indistinguishable from the widget having silently done nothing - there
+    is no progress feedback between the click and the eventual toast.
+    """
 
     def _worker() -> None:
+        if on_started is not None:
+            try:
+                on_started()
+            except Exception:
+                pass
         payload = dict(load_last_run_config())
         payload["prompt"] = prompt
         payload["session_id"] = "widget"
