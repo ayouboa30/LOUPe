@@ -7,8 +7,14 @@ name = "3loop"
 version = "0.1.0"
 description = "Asynchronous three-agent debate framework for code and mathematical problem solving."
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
 
 [project.optional-dependencies]
 web = ["httpx>=0.27"]

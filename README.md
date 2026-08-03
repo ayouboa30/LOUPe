@@ -1,8 +1,7 @@
 # 3loop
 
-Framework Python asynchrone de débat multi-agents, livré comme application
-de bureau Windows. Chaque cycle exécute trois identités sur un backend LLM
-partagé :
+Framework Python asynchrone de débat multi-agents. Licence MIT. Chaque cycle
+exécute trois identités sur un backend LLM partagé :
 
 1. **Heuristique** — propose une esquisse, une preuve ou un algorithme.
 2. **Critique** — cherche les hypothèses cachées, les erreurs, les cas limites.
@@ -15,7 +14,26 @@ Deux rôles de support ne votent pas : **Contexte** distille ce qui est
 transmis d'un cycle à l'autre, **Chercheur** résume les résultats web avant
 qu'ils n'atteignent le débat.
 
-## Application de bureau
+## Portabilité
+
+Le moteur (`three_loop/`) est du Python asyncio pur — aucune dépendance
+plateforme. L'interface (`web/`) tourne dans [pywebview](https://pywebview.flowrl.com/),
+qui embarque WebView2 sur Windows, WebKit sur macOS et GTK/Qt sur Linux :
+`python -m three_loop` ou `python desktop_app.py` fonctionnent sur les trois.
+
+Deux morceaux sont **spécifiques à Windows** et se dégradent proprement
+ailleurs (import protégé, aucun crash) :
+
+| composant | rôle | portage Linux/macOS |
+|---|---|---|
+| `native_widget.py` | mascotte flottante (Win32 direct, `ctypes`) | non porté — piste : Tk `overrideredirect` ou AppKit/GTK |
+| `assistant_actions.py` | micro et OCR (WinRT) | non porté — `speech_recognition` + `pytesseract` couvriraient l'équivalent |
+
+Sur Linux/macOS, l'app démarre, sert l'interface complète, et tous les
+backends (local, iGPU, OpenCode, cloud) fonctionnent ; seuls le personnage
+flottant et le micro/OCR manquent tant qu'ils ne sont pas portés.
+
+## Application de bureau (Windows)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
@@ -23,9 +41,15 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 Produit `dist\3loop\3loop.exe` (mode `--onedir` : le `--onefile` ré-extrayait
 ~350 Mo à chaque lancement). L'app ouvre une fenêtre WebView2 et une
-mascotte flottante — clic gauche pour ouvrir l'app, clic droit pour la
-fermer, et au survol deux actions : micro (dictée hors ligne) et loupe
-(capture d'écran + OCR).
+mascotte flottante.
+
+Fermer la fenêtre principale (❌) la **masque** — l'app et la mascotte
+restent actives, un clic sur la mascotte la rouvre. Pour quitter
+réellement : **clic droit sur la mascotte → « Fermer la mascotte »**, seule
+action qui arrête le processus.
+
+Au survol, deux actions : micro (dictée hors ligne) et loupe (capture
+d'écran + OCR, avec une animation de balayage pendant le traitement).
 
 ## Backends
 

@@ -8,6 +8,7 @@ a crash log next to nothing failing silently in windowed/no-console mode.
 from __future__ import annotations
 
 import ctypes
+import os
 import socket
 import sys
 import threading
@@ -16,8 +17,17 @@ import traceback
 import webbrowser
 from pathlib import Path
 
-from three_loop.native_widget import NativeWidget
 from three_loop.server import run_server
+
+# The floating mascot is a pure Win32 layered window (ctypes) and the
+# platform-specific bonus features it exposes (WinRT OCR/speech) only exist
+# on Windows. Importing it is wrapped so the core chat app - which runs
+# through pywebview, itself cross-platform (Windows/macOS/Linux) - still
+# starts on any OS; only the widget is skipped elsewhere.
+try:
+    from three_loop.native_widget import NativeWidget
+except Exception:
+    NativeWidget = None  # type: ignore[assignment,misc]
 
 
 def _log_path() -> Path:
@@ -73,6 +83,24 @@ def _open_native_window(url: str, *, port: int) -> bool:
             except Exception:
                 pass
 
+        # Clicking the window's own close button must not end the process:
+        # the mascot is meant to survive it and stay reachable on the
+        # desktop. pywebview's "closing" event fires before the native
+        # window is actually torn down, and any subscriber returning
+        # ``False`` cancels that teardown (see webview/event.py - a handler
+        # returning exactly ``False`` is what flips ``args.Cancel``). So the
+        # window is hidden instead of destroyed, and the process keeps
+        # running: the engine server thread and the widget's own message
+        # loop are untouched.
+        def _hide_instead_of_close() -> bool:
+            try:
+                main_window.hide()
+            except Exception:
+                pass
+            return False
+
+        main_window.events.closing += _hide_instead_of_close
+
         # A pure Win32 layered window instead of a second pywebview/WebView2
         # window: three different transparency tricks against a hosted
         # WebView2 control (layered color-key, DWM frame extension, WinForms
@@ -80,7 +108,24 @@ def _open_native_window(url: str, *, port: int) -> bool:
         # a browser control paints via its own composition surface. Talking
         # to Win32 directly with UpdateLayeredWindow has no such surface in
         # the way, so real per-pixel transparency actually works.
-        NativeWidget(_open_main, port=port).start()
+        if NativeWidget is not None:
+            # Right-click on the mascot is the only way to actually quit,
+            # since the main window no longer does: it destroys the widget's
+            # own window (ending its message loop) and then tears the whole
+            # process down. os._exit rather than a graceful webview.destroy()
+            # + return, because at this point the user has explicitly asked
+            # to end the app and there is nothing left worth waiting on
+            # (daemon threads: the engine server, any in-flight background
+            # prompt) - a clean shutdown path would just be dead code we'd
+            # never verified to fully unblock webview.start().
+            def _quit_app() -> None:
+                try:
+                    main_window.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
+
+            NativeWidget(_open_main, port=port, on_close=_quit_app).start()
 
         webview.start()
         return True

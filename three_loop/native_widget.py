@@ -22,9 +22,9 @@ background thread and finish with a Windows tray toast, so neither blocks
 nor steals focus from what the user is doing.
 
 The magnifying glass also puts the mascot into *scan mode*: glass raised,
-tail swishing, sweeping left and right across the screen until the answer
-comes back. The sweep is cosmetic - the screenshot is taken instantly - but
-without it a multi-second OCR and model round trip is indistinguishable
+sweeping left and right across the screen until the answer comes back. The
+sweep is cosmetic - the screenshot is taken instantly - but without it a
+multi-second OCR and model round trip is indistinguishable
 from the widget having frozen.
 """
 
@@ -67,6 +67,9 @@ WM_LBUTTONUP = 0x0202
 WM_RBUTTONUP = 0x0205
 WM_MOUSEMOVE = 0x0200
 WM_TIMER = 0x0113
+WM_COMMAND = 0x0111
+TPM_RIGHTBUTTON = 0x0002
+ID_CLOSE_MASCOT = 1001
 BI_RGB = 0
 DIB_RGB_COLORS = 0
 
@@ -96,6 +99,14 @@ user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctype
 user32.LoadCursorW.restype = HANDLE
 user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
 user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.CreatePopupMenu.restype = HANDLE
+user32.AppendMenuW.argtypes = [HANDLE, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+user32.TrackPopupMenu.argtypes = [
+    HANDLE, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, ctypes.c_void_p,
+]
+user32.TrackPopupMenu.restype = ctypes.c_int
+user32.DestroyMenu.argtypes = [HANDLE]
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
 gdi32.CreateCompatibleDC.restype = HANDLE
 gdi32.CreateCompatibleDC.argtypes = [HANDLE]
 gdi32.SelectObject.restype = HANDLE
@@ -204,8 +215,17 @@ def _build_icon(kind: str, size: int = _ICON_SIZE) -> np.ndarray:
 class NativeWidget:
     """A tiny always-on-top, draggable, transparent desktop companion."""
 
-    def __init__(self, on_click: Callable[[], None], *, x: int = 60, y: int = 60, port: int | None = None) -> None:
+    def __init__(
+        self,
+        on_click: Callable[[], None],
+        *,
+        x: int = 60,
+        y: int = 60,
+        port: int | None = None,
+        on_close: Callable[[], None] | None = None,
+    ) -> None:
         self._on_click = on_click
+        self._on_close = on_close
         self._port = port
         self._x = x
         self._y = y
@@ -223,8 +243,6 @@ class NativeWidget:
         self._glass_progress = 0.0  # 0 = idle frame, len(frames)-1 = fully raised
         self._icon_opacity = 0.0
         self._flip_horizontally = False  # rotate toward mouse
-        self._eye_blink = 0.0  # 0-1 animation for eye blink
-        self._tail_swing = 0.0  # 0-1 for tail swing during drag
         # Scan mode: the mascot holds its magnifying glass up and sweeps
         # across the screen while the OCR request is in flight. The sweep is
         # cosmetic - the screenshot is instantaneous - but it is what makes
@@ -324,22 +342,6 @@ class NativeWidget:
         elapsed = time.time() - self._start_time
         bob = round(math.sin(elapsed * 2.4) * 3.5)
 
-        # Eye blink: quick close/open every ~3s
-        blink_phase = (elapsed * 0.7) % 3.0
-        if 2.6 < blink_phase < 2.8:
-            self._eye_blink = min(1.0, (blink_phase - 2.6) / 0.2)
-        elif 2.8 <= blink_phase < 3.0:
-            self._eye_blink = max(0.0, (3.0 - blink_phase) / 0.2)
-        else:
-            self._eye_blink = 0.0
-
-        # Tail swing: oscillates while dragging, and while scanning - the
-        # mascot reads as busy rather than stuck.
-        if self._dragging or self._scanning:
-            self._tail_swing = 0.5 + 0.5 * math.sin(elapsed * 4.0)
-        else:
-            self._tail_swing = 0.5
-
         if self._scanning:
             self._advance_scan()
 
@@ -437,32 +439,6 @@ class NativeWidget:
         if self._icon_opacity > 0.01:
             for name, (x0, y0, _x1, _y1) in self._icon_rects.items():
                 self._composite_icon(buf, canvas_w, canvas_h, self._icon_images[name], x0, y0, self._icon_opacity)
-
-        # Draw simple eye blinks (just darken top area) if blinking
-        if self._eye_blink > 0.01:
-            eye_close = int(height * 0.15 * self._eye_blink)
-            for y in range(eye_close):
-                for x in range(width):
-                    dst_idx = ((oy + y) * canvas_w + (ox + x)) * 4
-                    if 0 <= dst_idx < len(buf) - 3:
-                        buf[dst_idx] = int(buf[dst_idx] * (1 - self._eye_blink * 0.7))
-                        buf[dst_idx + 1] = int(buf[dst_idx + 1] * (1 - self._eye_blink * 0.7))
-                        buf[dst_idx + 2] = int(buf[dst_idx + 2] * (1 - self._eye_blink * 0.7))
-
-        # Draw tail swing (offset ghostly line to the right of sprite)
-        tail_offset = int((self._tail_swing - 0.5) * 12)
-        tail_x = ox + width + 4 + tail_offset
-        for y in range(max(0, oy + int(height * 0.6)), min(canvas_h, oy + height)):
-            for dx in range(3):
-                px = tail_x + dx
-                if 0 <= px < canvas_w:
-                    dst_idx = (y * canvas_w + px) * 4
-                    if 0 <= dst_idx < len(buf) - 3:
-                        alpha = int(180 * (1 - dx / 3.0))
-                        buf[dst_idx] = min(255, buf[dst_idx] + 20)
-                        buf[dst_idx + 1] = min(255, buf[dst_idx + 1] + 30)
-                        buf[dst_idx + 2] = min(255, buf[dst_idx + 2] + 40)
-                        buf[dst_idx + 3] = alpha
 
         old_bitmap = gdi32.SelectObject(mem_dc, bitmap)
 
@@ -591,6 +567,25 @@ class NativeWidget:
         self._end_scan()
         self._finish_prompt(answer, success)
 
+    def _show_context_menu(self, hwnd: wintypes.HWND) -> None:
+        """A real right-click menu with one item: "Fermer la mascotte".
+
+        Destroying the window on any right-click (the previous behaviour)
+        risked closing it by accident with no way back short of relaunching
+        the app. A menu makes it a deliberate choice.
+        """
+
+        cursor = wintypes.POINT()
+        user32.GetCursorPos(ctypes.byref(cursor))
+        menu = user32.CreatePopupMenu()
+        user32.AppendMenuW(menu, 0, ID_CLOSE_MASCOT, "Fermer la mascotte")
+        # Recommended Win32 pattern for a popup menu owned by a window that
+        # is not the foreground window: without this the menu can fail to
+        # dismiss itself when the user clicks elsewhere.
+        user32.SetForegroundWindow(hwnd)
+        user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, hwnd, None)
+        user32.DestroyMenu(menu)
+
     def _wndproc(self, hwnd: wintypes.HWND, msg: int, wparam: int, lparam: int) -> int:
         if msg == WM_TIMER:
             self._redraw()
@@ -638,9 +633,23 @@ class NativeWidget:
                         pass
             return 0
         if msg == WM_RBUTTONUP:
-            user32.DestroyWindow(hwnd)
+            self._show_context_menu(hwnd)
+            return 0
+        if msg == WM_COMMAND:
+            if (wparam & 0xFFFF) == ID_CLOSE_MASCOT:
+                user32.DestroyWindow(hwnd)
             return 0
         if msg == WM_DESTROY:
             user32.PostQuitMessage(0)
+            # Right-click ("fermer la mascotte") is the only way to destroy
+            # this window, and with the main app window now hidden instead
+            # of closed on the X button, it is also the only remaining way
+            # to quit the whole application - so the caller gets a callback
+            # here to tear the rest of the process down.
+            if self._on_close is not None:
+                try:
+                    self._on_close()
+                except Exception:
+                    pass
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
