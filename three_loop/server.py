@@ -17,6 +17,7 @@ from typing import Any
 
 from .assistant_actions import save_last_run_config
 from .backend import AirLLMBackend, CloudApiBackend, DemoBackend, LlamaCppBackend, LiteLLMBackend, OllamaBackend, SharedLLMBackend
+from .compact import compact_text
 from .igpu import ensure_server as ensure_igpu_server, probe as igpu_probe
 from .models import AGENT_ROLES, AgentRole, EventType, PipelineEvent, TaskKind
 from .opencode_backend import (
@@ -27,6 +28,7 @@ from .opencode_backend import (
 )
 from .pipeline import PipelineConfig, ThreeLoopPipeline
 from .temperature import TemperatureOptimizer
+from .scrape import fetch_page
 from .web import DuckDuckGoSearchProvider
 
 #: One optimizer per client session id, so the temperature prior keeps
@@ -259,8 +261,36 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib method name
         if self.path == "/api/run":
             self._handle_run()
+        elif self.path == "/api/scrape":
+            self._handle_scrape()
         else:
             self.send_error(404)
+
+    def _handle_scrape(self) -> None:
+        """Fetch a URL, strip it to readable text, and return it compacted.
+
+        Runs synchronously (a single page fetch, not the streamed debate) so
+        the composer's "attach a link" affordance gets an answer back before
+        the request it's building even starts.
+        """
+
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self.send_error(400)
+            return
+        url = str(payload.get("url", "")).strip()
+        if not url:
+            self._send_json({"error": "URL manquante."})
+            return
+        try:
+            title, text = fetch_page(url)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)})
+            return
+        compacted = compact_text(text, max_tokens=1200)
+        self._send_json({"title": title, "url": url, "text": compacted})
 
     def _serve_static(self) -> None:
         rel_path = self.path.split("?", 1)[0].lstrip("/") or "index.html"

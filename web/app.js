@@ -467,14 +467,14 @@ function currentBackendLabel() {
   return opt ? opt.textContent : backendSelect.value;
 }
 
-async function runPrompt(prompt) {
+async function runPrompt(prompt, enginePrompt = prompt) {
   addUserMessage(prompt);
   const wrap = addAssistantMessage();
   resetSidePanel();
   const votes = {};
 
   const payload = {
-    prompt,
+    prompt: enginePrompt,
     session_id: state.sessionId,
     backend: backendSelect.value,
     model: modelSelect.value,
@@ -603,6 +603,28 @@ promptInput.addEventListener("keydown", (event) => {
   }
 });
 
+// ---------------------------------------------------------------- scraping
+//
+// A URL typed or pasted into the composer is fetched, stripped to its
+// readable text (server-side: HTML chrome and scripts never reach the
+// browser), and folded into what the engine sees - the user's own message
+// still shows exactly what they typed, only the model gets the page.
+
+const URL_RE = /https?:\/\/[^\s]+/;
+
+function stripUrls(text) {
+  return text.replace(/https?:\/\/[^\s]+/g, "").replace(/\s{2,}/g, " ").trim();
+}
+
+async function scrapeUrl(url) {
+  const response = await fetch("/api/scrape", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  return response.json();
+}
+
 composerEl.addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = promptInput.value.trim();
@@ -611,13 +633,36 @@ composerEl.addEventListener("submit", async (event) => {
   promptInput.style.height = "auto";
   state.running = true;
   sendBtn.disabled = true;
+
+  const urlMatch = text.match(URL_RE);
+  let enginePrompt = text;
+
   try {
-    await runPrompt(text);
+    if (urlMatch) {
+      updateStatus(`Lecture de ${urlMatch[0]}…`);
+      const page = await scrapeUrl(urlMatch[0]);
+      if (page.error) {
+        updateStatus("");
+        errorInAssistantMessage(addAssistantMessage(), `Page illisible: ${page.error}`);
+        return;
+      }
+      const question = stripUrls(text) || "Resume cette page.";
+      enginePrompt =
+        `Page web "${page.title || page.url}" (${page.url}):\n---\n${page.text}\n---\n\n` +
+        `Question de l'utilisateur: ${question}`;
+      updateStatus("");
+    }
+    await runPrompt(text, enginePrompt);
   } finally {
     state.running = false;
     sendBtn.disabled = promptInput.value.trim().length === 0;
   }
 });
+
+function updateStatus(text) {
+  panelStatus.textContent = text || "Aucune execution pour l'instant.";
+  panelStatus.className = text ? "" : "muted";
+}
 
 // ---------------------------------------------------------------- boot
 
