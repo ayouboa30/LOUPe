@@ -175,16 +175,31 @@ class DuckDuckGoSearchProvider:
         self.timeout = timeout
 
     async def search(self, query: str, *, max_results: int = 5) -> Sequence[SearchResult]:
-        """Fetch and parse a public HTML results page."""
+        """Fetch and parse a public HTML results page.
+
+        Two things measured necessary to get real results instead of a
+        silent empty page: DuckDuckGo's HTML endpoint serves the plain
+        homepage (no results, no error) to a GET request carrying a
+        non-browser User-Agent - it just looks like a bot query and gets
+        the safe default response. POSTing the query as form data with an
+        ordinary browser User-Agent returns the actual results page.
+        """
 
         import urllib.error
         import urllib.request
 
-        url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-
         def fetch() -> str:
             request = urllib.request.Request(
-                url, headers={"User-Agent": "3loop/0.1 (+https://python.org)"}
+                "https://html.duckduckgo.com/html/",
+                data=f"q={quote_plus(query)}".encode("ascii"),
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                    ),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                method="POST",
             )
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:

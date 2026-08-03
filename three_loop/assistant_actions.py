@@ -20,15 +20,18 @@ mic/OCR question gets answered the same way a typed one would.
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import threading
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Callable
 
-from PIL import ImageGrab
+from PIL import Image, ImageGrab
 
 from .compact import compact_text
+from .models import SearchResult
 
 _LAST_CONFIG_PATH = Path.home() / ".3loop" / "last_run_config.json"
 
@@ -49,13 +52,18 @@ def save_last_run_config(payload: dict[str, Any]) -> None:
         pass
 
 
-def capture_and_ocr() -> str:
-    """Screenshot the whole screen and read it with the Windows OCR engine."""
+def ocr_image(image: Image.Image) -> str:
+    """Read an already-captured image with the Windows OCR engine.
+
+    Split from the capture step so the caller controls *what* gets grabbed:
+    the magnifying glass now lets the user drag-select a region instead of
+    always taking the whole screen, and this function doesn't need to know
+    which.
+    """
 
     import winocr
     from winrt.windows.media.ocr import OcrEngine
 
-    image = ImageGrab.grab()
     languages = list(OcrEngine.available_recognizer_languages)
     if not languages:
         raise RuntimeError(
@@ -71,13 +79,26 @@ def capture_and_ocr() -> str:
     return asyncio.run(_run())
 
 
+def capture_and_ocr() -> str:
+    """Screenshot the whole screen and read it with the Windows OCR engine."""
+
+    return ocr_image(ImageGrab.grab())
+
+
 #: A full-screen OCR pass returns everything: window titles, the taskbar,
 #: menu labels. At ~14 ms per prompt token that noise costs real time, so the
 #: text is compacted and capped before it reaches the model.
 _SCREEN_TEXT_MAX_TOKENS = 900
 
-#: Below this, the capture is menu chrome rather than content worth reading.
-_MIN_USEFUL_CHARS = 40
+#: Below this, there is nothing to work with at all (OCR found no text, or
+#: only a stray character). Deliberately low: capture is now a user-driven
+#: drag-select rather than an automatic full-screen grab, so a short but
+#: meaningful selection - a single error message, a label - is the normal
+#: case, not noise to filter out. Measured: a 34-character error message
+#: ("ZeroDivisionError division by zero") was being silently dropped by the
+#: higher threshold this used to be, tuned for full-screen captures where
+#: most of the text was incidental UI chrome.
+_MIN_USEFUL_CHARS = 6
 
 
 def compact_screen_text(ocr_text: str, *, max_tokens: int = _SCREEN_TEXT_MAX_TOKENS) -> str:
@@ -141,6 +162,80 @@ def build_screen_reading_prompt(ocr_text: str) -> str | None:
     )
 
 
+def _search_query_from_screen_text(compacted: str, *, max_chars: int = 120) -> str:
+    """A short query from OCR'd text: its first non-trivial line.
+
+    The full capture is often several sentences; search engines want a
+    handful of words, not a paragraph, so only the opening fragment (the
+    part of the screen the user's eye lands on first) is used.
+    """
+
+    first_line = next((line for line in compacted.splitlines() if len(line) > 8), compacted)
+    return first_line[:max_chars].strip()
+
+
+def build_screen_search_prompt(ocr_text: str, sources: Sequence[SearchResult]) -> str | None:
+    """Explain a screen capture *and* what a web search about it turned up.
+
+    Where ``build_screen_reading_prompt`` only has the OCR text to go on,
+    this also hands the model a handful of search results so its answer can
+    be grounded in something beyond what's visible on screen - e.g. an error
+    message explained with the fix that shows up when you search for it.
+    """
+
+    compacted = compact_screen_text(ocr_text or "")
+    if len(compacted) < _MIN_USEFUL_CHARS:
+        return None
+    rendered_sources = "\n".join(
+        f"- {source.title or source.url} ({source.url}): {source.snippet}"
+        for source in sources
+    ) or "(aucun resultat trouve)"
+    return (
+        "Voici le texte lu a l'ecran de l'utilisateur par OCR (brut, "
+        "non ordonne, melange contenu utile et elements d'interface) et des "
+        "resultats d'une recherche web lancee a partir de ce texte.\n\n"
+        f"TEXTE A L'ECRAN:\n---\n{compacted}\n---\n\n"
+        f"RESULTATS DE RECHERCHE:\n{rendered_sources}\n\n"
+        "Explique ce qui est affiche a l'ecran en t'appuyant sur les "
+        "resultats de recherche quand ils sont pertinents (une erreur "
+        "expliquee avec sa solution trouvee en ligne, un terme technique "
+        "defini, etc.). Ignore les elements d'interface et les resultats "
+        "hors sujet. Reponds en francais, de maniere concise."
+    )
+
+
+async def search_from_screen_text(ocr_text: str, *, max_results: int = 5) -> list[SearchResult]:
+    """Run a web search seeded by what was read off the screen.
+
+    Failures here (network down, DuckDuckGo unreachable) return an empty
+    list rather than raising: the caller can still explain the screen
+    content from OCR alone, which is strictly better than failing the whole
+    action because the web search step didn't work.
+    """
+
+    from .web import DuckDuckGoSearchProvider
+
+    compacted = compact_screen_text(ocr_text or "")
+    query = _search_query_from_screen_text(compacted)
+    if not query:
+        return []
+    try:
+        results = await DuckDuckGoSearchProvider().search(query, max_results=max_results)
+        return list(results)
+    except Exception:
+        return []
+
+
+#: HRESULT 0x80045509 ("the speech privacy policy was not accepted"),
+#: surfaced by pythonnet/winrt as this negative decimal. Windows requires
+#: the *user* to have opted into online speech recognition once via
+#: Settings before any WinRT app - UWP or plain desktop - can use it; there
+#: is no API to accept the policy on the user's behalf. Measured directly:
+#: a first, un-diagnosed version of this function just failed with "le
+#: micro ne marche pas" and no indication why.
+_PRIVACY_POLICY_NOT_ACCEPTED = -2147199735
+
+
 def listen_and_transcribe(timeout_seconds: float = 12.0) -> str:
     """Blocking one-shot dictation via the WinRT speech recognizer."""
 
@@ -164,7 +259,27 @@ def listen_and_transcribe(timeout_seconds: float = 12.0) -> str:
                 except Exception:
                     pass
 
-    return asyncio.run(_run())
+    try:
+        return asyncio.run(_run())
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == _PRIVACY_POLICY_NOT_ACCEPTED:
+            _open_speech_privacy_settings()
+            raise RuntimeError(
+                "La reconnaissance vocale en ligne de Windows n'est pas "
+                "activee. J'ai ouvert les parametres : Confidentialite et "
+                "securite > Voix > active 'Reconnaissance vocale en ligne', "
+                "puis reessaie."
+            ) from exc
+        raise
+
+
+def _open_speech_privacy_settings() -> None:
+    """Open Windows' speech privacy settings page, best-effort."""
+
+    try:
+        os.startfile("ms-settings:privacy-speech")  # noqa: S606 - user-facing Settings URI
+    except OSError:
+        pass
 
 
 def run_prompt_in_background(

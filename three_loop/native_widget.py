@@ -16,16 +16,20 @@ web/app.js) - real alpha transparency baked into the files, no procedural
 approximation.
 
 Hovering the mascot fades in two action icons to its right: a mic (one-shot
-voice question) and a magnifying glass (capture the screen, OCR it, and have
-the model explain what is on it). Both run against the local engine on a
-background thread and finish with a Windows tray toast, so neither blocks
-nor steals focus from what the user is doing.
+voice question) and a magnifying glass. The glass lets the user drag-select
+a region of the screen; that region is read with OCR, a web search is fired
+from what it found, and the model explains the capture using both. Both
+actions run against the local engine on a background thread and finish with
+a Windows tray toast, so neither blocks nor steals focus from what the user
+is doing.
 
-The magnifying glass also puts the mascot into *scan mode*: glass raised,
-sweeping left and right across the screen until the answer comes back. The
-sweep is cosmetic - the screenshot is taken instantly - but without it a
-multi-second OCR and model round trip is indistinguishable
-from the widget having frozen.
+An earlier version auto-captured the whole screen and had the mascot sweep
+across it while waiting - the sweep didn't correspond to what was actually
+being captured (always the whole screen, regardless of the sweep's path),
+which read as an animation bug rather than a useful cue. Letting the user
+drag the exact region themselves removes that mismatch: the drag itself is
+the feedback, so the mascot just raises its glass and holds it while the
+capture is read, searched and explained.
 """
 
 from __future__ import annotations
@@ -45,9 +49,11 @@ from PIL import Image, ImageDraw
 from . import notify
 from .assistant_actions import (
     build_screen_reading_prompt,
-    capture_and_ocr,
+    build_screen_search_prompt,
     listen_and_transcribe,
+    ocr_image,
     run_prompt_in_background,
+    search_from_screen_text,
 )
 
 user32 = ctypes.windll.user32
@@ -243,13 +249,11 @@ class NativeWidget:
         self._glass_progress = 0.0  # 0 = idle frame, len(frames)-1 = fully raised
         self._icon_opacity = 0.0
         self._flip_horizontally = False  # rotate toward mouse
-        # Scan mode: the mascot holds its magnifying glass up and sweeps
-        # across the screen while the OCR request is in flight. The sweep is
-        # cosmetic - the screenshot is instantaneous - but it is what makes
-        # the wait legible instead of the app appearing to have frozen.
-        self._scanning = False
-        self._scan_started_at = 0.0
-        self._scan_origin: tuple[int, int] | None = None
+        # True while an OCR/search/mic request is in flight: keeps the
+        # magnifying glass raised so the mascot visibly reads as busy. The
+        # region-select drag itself is the main feedback for what is being
+        # captured; this only covers the OCR+search+model time after that.
+        self._busy_glass_raised = False
 
         sprite_w = max(f[1] for f in self._frames)
         sprite_h = max(f[2] for f in self._frames)
@@ -327,10 +331,10 @@ class NativeWidget:
 
         # Ease the magnifying glass (and the action icons' fade-in) over
         # ~0.5s instead of snapping, mirroring the web avatar's CSS
-        # steps() hover animation. While scanning the glass stays fully
-        # raised regardless of where the pointer is.
+        # steps() hover animation. While a request is in flight the glass
+        # stays fully raised regardless of where the pointer is.
         last_frame = len(self._frames) - 1
-        target = last_frame if (self._hovering or self._scanning) else 0.0
+        target = last_frame if (self._hovering or self._busy_glass_raised) else 0.0
         step = last_frame / 15.0
         if self._glass_progress < target:
             self._glass_progress = min(target, self._glass_progress + step)
@@ -342,52 +346,10 @@ class NativeWidget:
         elapsed = time.time() - self._start_time
         bob = round(math.sin(elapsed * 2.4) * 3.5)
 
-        if self._scanning:
-            self._advance_scan()
-
         pixels, width, height = self._frames[frame_index]
         if self._flip_horizontally:
             pixels = self._flip_pixels_horizontal(pixels, width, height)
         self._blit(pixels, width, height, bob)
-
-    #: One full left-right-left sweep of the screen, in seconds.
-    _SCAN_PERIOD = 2.4
-
-    def _advance_scan(self) -> None:
-        """Sweep the mascot across the screen while a capture is processed.
-
-        Purely cosmetic: the screenshot is taken instantly at the start. The
-        motion exists so a multi-second OCR + model round trip looks like
-        work in progress rather than a frozen widget. The window returns to
-        where the user had put it once the scan ends.
-        """
-
-        if self._scan_origin is None:
-            return
-        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-        travel = max(0, screen_w - self._canvas_w - 40)
-        phase = ((time.time() - self._scan_started_at) / self._SCAN_PERIOD) % 1.0
-        # Triangle wave: 0 -> 1 -> 0, so the sweep reverses instead of
-        # teleporting back to the left edge.
-        ratio = 2 * phase if phase < 0.5 else 2 * (1 - phase)
-        # Ease in/out so the reversals are not abrupt.
-        eased = ratio * ratio * (3 - 2 * ratio)
-        user32.SetWindowPos(
-            self._hwnd, None,
-            20 + int(travel * eased), self._scan_origin[1],
-            0, 0, 0x0001 | 0x0004,  # NOSIZE | NOZORDER
-        )
-
-    def _end_scan(self) -> None:
-        """Stop sweeping and put the widget back where the user left it."""
-
-        self._scanning = False
-        if self._scan_origin is not None and self._hwnd is not None:
-            user32.SetWindowPos(
-                self._hwnd, None, self._scan_origin[0], self._scan_origin[1],
-                0, 0, 0x0001 | 0x0004,
-            )
-        self._scan_origin = None
 
     @staticmethod
     def _flip_pixels_horizontal(pixels: bytes, width: int, height: int) -> bytes:
@@ -526,45 +488,65 @@ class NativeWidget:
         threading.Thread(target=worker, daemon=True).start()
 
     def _start_ocr_flow(self) -> None:
-        """Capture the screen, read it, and have the model explain it.
+        """Let the user drag-select a region, read it, search the web from
+        it, and have the model explain it using both.
 
-        No question is asked. An earlier version opened a text dialog first,
-        which is where the flow died in practice: the dialog could land
-        behind the other windows, and cancelling it left the mascot busy
-        with nothing on screen to explain why. Reading what is on screen is
-        unambiguous enough to act on directly.
+        No text dialog is opened. An earlier version had one, which is where
+        the flow died in practice: the dialog could land behind other
+        windows, and cancelling it left the mascot busy with nothing to show
+        for it. The drag-select gesture (mouse down, drag, release) is itself
+        the input - unambiguous, and it never leaves an orphaned window.
         """
 
         if self._busy or self._port is None:
             return
         self._busy = True
 
-        rect = wintypes.RECT()
-        user32.GetWindowRect(self._hwnd, ctypes.byref(rect))
-        self._scan_origin = (rect.left, rect.top)
-        self._scan_started_at = time.time()
-        self._scanning = True
-
         def worker() -> None:
+            from .screen_capture import select_region_and_capture
+
             try:
-                ocr_text = capture_and_ocr()
+                image = select_region_and_capture()
             except Exception as exc:
-                self._end_scan()
+                self._notify(f"Erreur de capture: {exc}")
+                self._busy = False
+                return
+            if image is None:
+                self._busy = False  # user cancelled (Esc / right-click / no drag)
+                return
+
+            self._busy_glass_raised = True
+            try:
+                self._run_ocr_search_and_explain(image)
+            except Exception as exc:
+                self._busy_glass_raised = False
                 self._notify(f"Erreur OCR: {exc}")
                 self._busy = False
-                return
-            prompt = build_screen_reading_prompt(ocr_text)
-            if prompt is None:
-                self._end_scan()
-                self._notify("Aucun texte lisible n'a ete trouve a l'ecran.")
-                self._busy = False
-                return
-            run_prompt_in_background(prompt, port=self._port, on_done=self._finish_scan)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_scan(self, answer: str, success: bool) -> None:
-        self._end_scan()
+    def _run_ocr_search_and_explain(self, image: Image.Image) -> None:
+        ocr_text = ocr_image(image)
+
+        try:
+            import asyncio
+
+            results = asyncio.run(search_from_screen_text(ocr_text))
+        except Exception:
+            results = []  # a broken search must not sink an otherwise-fine OCR
+
+        prompt = build_screen_search_prompt(ocr_text, results) if results else None
+        if prompt is None:
+            prompt = build_screen_reading_prompt(ocr_text)
+        if prompt is None:
+            self._busy_glass_raised = False
+            self._notify("Aucun texte lisible n'a ete trouve dans la selection.")
+            self._busy = False
+            return
+        run_prompt_in_background(prompt, port=self._port, on_done=self._finish_ocr)
+
+    def _finish_ocr(self, answer: str, success: bool) -> None:
+        self._busy_glass_raised = False
         self._finish_prompt(answer, success)
 
     def _show_context_menu(self, hwnd: wintypes.HWND) -> None:

@@ -49,3 +49,47 @@ def test_triangulate_sources_searches_independently() -> None:
     assert len(result.sources) == 1
     assert result.sources[0].url == "https://docs.example.org/reference"
     assert set(result.sources[0].agent_ids) == {"heuristic", "critic"}
+
+
+def test_duckduckgo_search_posts_form_data_with_a_browser_user_agent() -> None:
+    """A GET with a non-browser UA silently returns DDG's homepage (no
+    results, no error) instead of the results page - measured directly.
+    POSTing form data with an ordinary browser UA is what actually works.
+    """
+
+    import urllib.request
+
+    from three_loop.web import DuckDuckGoSearchProvider
+
+    captured = {}
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'<a class="result__a" href="https://example.org">Titre</a>'
+
+    def fake_urlopen(request, timeout=None):
+        captured["method"] = request.get_method()
+        captured["data"] = request.data
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        return _FakeResponse()
+
+    import three_loop.web as web_module
+
+    original = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        import asyncio
+
+        asyncio.run(DuckDuckGoSearchProvider().search("test query"))
+    finally:
+        urllib.request.urlopen = original
+
+    assert captured["method"] == "POST"
+    assert captured["data"] == b"q=test+query"
+    assert "mozilla" in captured["headers"].get("user-agent", "").lower()
