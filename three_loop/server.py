@@ -17,7 +17,13 @@ from typing import Any
 
 from .assistant_actions import save_last_run_config
 from .backend import AirLLMBackend, CloudApiBackend, DemoBackend, LlamaCppBackend, LiteLLMBackend, OllamaBackend, SharedLLMBackend
+from .coding_cli_backends import (
+    CLAUDE_CODE_DEFAULT_MODEL,
+    ClaudeCodeBackend,
+    CodexBackend,
+)
 from .compact import compact_text
+from .documents import extract_text as extract_document_text
 from .igpu import ensure_server as ensure_igpu_server, probe as igpu_probe
 from .models import AGENT_ROLES, AgentRole, EventType, PipelineEvent, TaskKind
 from .opencode_backend import (
@@ -80,6 +86,42 @@ def _opencode_config() -> dict[str, Any]:
     return _OPENCODE_CONFIG
 
 
+#: Claude Code and Codex have no "list models" subcommand the way OpenCode
+#: does, so - unlike OpenCode's dynamically-fetched list - only the models
+#: actually verified/documented are offered. Codex's own default (read from
+#: the user's ~/.codex/config.toml when no model is passed) is left as an
+#: empty-string choice rather than guessing a model id: this machine's own
+#: config names a locally-configured model ("gpt-5.6-luna"), not something
+#: safe to assume is universal.
+_CODING_CLI_AGENTS: dict[str, dict[str, Any]] = {
+    "claude_code": {
+        "find": ClaudeCodeBackend.find,
+        "models": ["sonnet", "opus", "haiku"],
+        "default": CLAUDE_CODE_DEFAULT_MODEL,
+    },
+    "codex": {
+        "find": CodexBackend.find,
+        "models": [""],
+        "default": "",
+    },
+}
+_CODING_CLI_CONFIG_CACHE: dict[str, dict[str, Any]] = {}
+
+
+def _coding_cli_config(name: str) -> dict[str, Any]:
+    """Report whether a coding-agent CLI is installed, cached per process."""
+
+    if name not in _CODING_CLI_CONFIG_CACHE:
+        spec = _CODING_CLI_AGENTS[name]
+        executable = spec["find"]()
+        _CODING_CLI_CONFIG_CACHE[name] = {
+            "available": executable is not None,
+            "models": spec["models"] if executable else [],
+            "default": spec["default"],
+        }
+    return _CODING_CLI_CONFIG_CACHE[name]
+
+
 def _support_backend(main_backend: SharedLLMBackend) -> SharedLLMBackend:
     """Pick the smallest local GGUF to run the summarising support roles.
 
@@ -138,6 +180,14 @@ def _build_backend(payload: dict[str, Any]) -> SharedLLMBackend:
     if backend_name == "opencode":
         model = (payload.get("model") or "").strip()
         return OpenCodeBackend(model or OPENCODE_DEFAULT_MODEL)
+    if backend_name == "claude_code":
+        model = (payload.get("model") or "").strip()
+        return ClaudeCodeBackend(model or CLAUDE_CODE_DEFAULT_MODEL)
+    if backend_name == "codex":
+        # Empty model is deliberate here: Codex falls back to whatever the
+        # user's own ~/.codex/config.toml names, which 3loop should not
+        # override with a guessed identifier.
+        return CodexBackend(payload.get("model") or "")
     if backend_name == "groq":
         return CloudApiBackend.for_provider("groq", payload["model"], payload.get("api_key", ""))
     if backend_name == "nvidia":
@@ -252,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                         for name, (_, models, signup) in CloudApiBackend.PROVIDERS.items()
                     },
                     "opencode": _opencode_config(),
+                    "claude_code": _coding_cli_config("claude_code"),
+                    "codex": _coding_cli_config("codex"),
                     "igpu": igpu_probe(),
                 }
             )
@@ -263,6 +315,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_run()
         elif self.path == "/api/scrape":
             self._handle_scrape()
+        elif self.path == "/api/documents":
+            self._handle_document()
         else:
             self.send_error(404)
 
@@ -291,6 +345,47 @@ class Handler(BaseHTTPRequestHandler):
             return
         compacted = compact_text(text, max_tokens=1200)
         self._send_json({"title": title, "url": url, "text": compacted})
+
+    def _handle_document(self) -> None:
+        """Extract text from an uploaded file (PDF/txt/md/...), base64-encoded.
+
+        Base64-over-JSON rather than a real multipart parser: the whole
+        point of this server is staying stdlib-only and dependency-free,
+        and ``http.server`` has no multipart support built in. Documents
+        attached from the UI are small enough (a few MB at most) that the
+        ~33% base64 overhead is not worth a hand-rolled multipart parser.
+        No file ever touches disk - extraction happens entirely in memory
+        and nothing is written back except the compacted text.
+        """
+
+        import base64
+        import binascii
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 20_000_000:  # ~15 MB of real file, generous for a document
+            self._send_json({"error": "Fichier trop volumineux (20 Mo max)."})
+            return
+        try:
+            payload = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self.send_error(400)
+            return
+        name = str(payload.get("name", "")).strip()
+        content_b64 = payload.get("content_base64", "")
+        if not name or not content_b64:
+            self._send_json({"error": "Fichier ou nom manquant."})
+            return
+        try:
+            data = base64.b64decode(content_b64, validate=True)
+        except (binascii.Error, ValueError):
+            self._send_json({"error": "Fichier corrompu (decodage impossible)."})
+            return
+        try:
+            text = extract_document_text(name, data)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)})
+            return
+        self._send_json({"name": name, "text": text})
 
     def _serve_static(self) -> None:
         rel_path = self.path.split("?", 1)[0].lstrip("/") or "index.html"

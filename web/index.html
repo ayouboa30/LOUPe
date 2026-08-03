@@ -74,22 +74,29 @@
     </form>
   </main>
 
-  <aside class="side-panel">
+  <button id="side-panel-toggle" class="side-panel-toggle" type="button" aria-label="Afficher le panneau" title="Documents et discussions" hidden>
+    <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+
+  <aside class="side-panel" id="side-panel">
+    <button id="side-panel-close" class="side-panel-close" type="button" aria-label="Réduire le panneau" title="Réduire">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+
     <div class="panel-card">
-      <h4>Sorties</h4>
-      <div id="panel-status" class="muted">Aucune exécution pour l'instant.</div>
+      <h4>Documents</h4>
+      <p class="panel-hint">PDF, texte ou markdown. Coché = inclus dans le prochain message.</p>
+      <label class="btn-upload">
+        + Ajouter un document
+        <input id="document-input" type="file" accept=".pdf,.txt,.md,.markdown,.csv,.log" multiple hidden />
+      </label>
+      <div id="document-list" class="doc-list muted">Aucun document.</div>
     </div>
+
     <div class="panel-card">
-      <h4>Sources</h4>
-      <div id="panel-sources" class="muted">Aucune source pour l'instant.</div>
-    </div>
-    <div class="panel-card">
-      <h4>Détail du débat</h4>
-      <div id="panel-debate" class="muted">Rien à afficher pour l'instant.</div>
-    </div>
-    <div class="panel-card">
-      <h4>Prior de température</h4>
-      <svg id="temp-chart" viewBox="0 0 260 110" class="temp-chart"></svg>
+      <h4>Discussions</h4>
+      <button id="save-discussion" class="btn-upload" type="button">+ Sauvegarder la discussion actuelle</button>
+      <div id="discussion-list" class="doc-list muted">Aucune discussion sauvegardée.</div>
     </div>
   </aside>
 

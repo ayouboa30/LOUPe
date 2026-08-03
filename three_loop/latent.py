@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from .agents import parse_vote
 from .backend import SharedLLMBackend
 from .models import AGENT_ROLES, AgentRole, LatentDebateResult, SourceMatch, TaskKind
-from .opencode_backend import OpenCodeBackend, build_opencode_prompt
+from .cli_agent_backend import CLIAgentBackend, build_cli_agent_prompt
 from .prompting import build_prefix, with_role
 
 
@@ -85,8 +85,8 @@ class LatentDebateCoordinator:
     ) -> LatentDebateResult:
         """Generate all contributions in one concise structured completion."""
 
-        if isinstance(self.backend, OpenCodeBackend):
-            prompt = self._build_opencode_prompt(
+        if isinstance(self.backend, CLIAgentBackend):
+            prompt = self._build_cli_agent_prompt(
                 task, kind=kind, cycle=cycle, history=history,
                 sources=sources, research_digest=research_digest,
             )
@@ -158,7 +158,7 @@ class LatentDebateCoordinator:
         return parse_latent_debate(raw, task=task)
 
     @staticmethod
-    def _build_opencode_prompt(
+    def _build_cli_agent_prompt(
         task: str,
         *,
         kind: TaskKind,
@@ -167,13 +167,16 @@ class LatentDebateCoordinator:
         sources: Sequence[SourceMatch],
         research_digest: str,
     ) -> str:
-        """OpenCode-shaped variant of the debate prompt built above.
+        """CLI-agent-shaped variant of the debate prompt built above.
 
-        Kept as a second, separately maintained template rather than a
-        transform of the local one - see ``build_opencode_prompt`` for why.
-        The debate schema itself (roles, conciseness rule, JSON shape) is
-        the same information, just framed as plain instructions instead of
-        terse protocol markers.
+        Used for OpenCode, Claude Code and Codex alike - all three are a
+        fresh subprocess per call rather than a persistent local model, so
+        none of them benefit from (or need) the KV-prefix-oriented local
+        template. Kept as a second, separately maintained template rather
+        than a transform of the local one - see ``build_cli_agent_prompt``
+        for why. The debate schema itself (roles, conciseness rule, JSON
+        shape) is the same information, just framed as plain instructions
+        instead of terse protocol markers.
         """
 
         instruction = (
@@ -200,7 +203,7 @@ class LatentDebateCoordinator:
             '{"role":"critic","resolved":true,"confidence":0.0,"rationale":"une phrase"},\n'
             '{"role":"writer","resolved":true,"confidence":0.0,"rationale":"une phrase"}]}'
         )
-        return build_opencode_prompt(
+        return build_cli_agent_prompt(
             instruction=instruction,
             task=task,
             kind=kind,

@@ -8,10 +8,11 @@ prompt sizes, 14.3 ms per prompt token).
 Against a local llama.cpp backend both build their prompt as
 ``build_prefix(...) + short role suffix`` so they land inside llama.cpp's
 reused KV prefix: measured ~1.7 s per extra agent that follows that rule,
-versus ~12.7 s for one that does not. Against ``OpenCodeBackend`` they use
-``build_opencode_prompt`` instead - that measurement doesn't apply to a
-remote agent subprocess, and the local template's protocol markers read to
-a coding agent as a project to go inspect.
+versus ~12.7 s for one that does not. Against any CLI-agent backend
+(OpenCode, Claude Code, Codex - all subclass ``CLIAgentBackend``) they use
+``build_cli_agent_prompt`` instead - that measurement doesn't apply to a
+fresh subprocess per call, and the local template's protocol markers read
+to a coding agent as a project to go inspect.
 """
 
 from __future__ import annotations
@@ -20,8 +21,8 @@ import re
 from collections.abc import Sequence
 
 from .backend import SharedLLMBackend
+from .cli_agent_backend import CLIAgentBackend, build_cli_agent_prompt
 from .models import AgentRole, SourceMatch, TaskKind
-from .opencode_backend import OpenCodeBackend, build_opencode_prompt
 from .prompting import build_prefix, with_role
 
 _SYSTEM = (
@@ -69,8 +70,8 @@ class ContextAgent:
             "contraintes, les chiffres et les noms propres. Supprime les "
             "reformulations et les politesses. Pas de commentaire."
         )
-        if isinstance(self.backend, OpenCodeBackend):
-            prompt = build_opencode_prompt(
+        if isinstance(self.backend, CLIAgentBackend):
+            prompt = build_cli_agent_prompt(
                 instruction=instruction_body, task=task, kind=kind,
             )
             system_prompt = None
@@ -128,8 +129,8 @@ class ResearchAgent:
             "maximum, chacun suivi de son numero de source entre crochets. "
             "Ignore ce qui est hors sujet. Pas de commentaire."
         )
-        if isinstance(self.backend, OpenCodeBackend):
-            prompt = build_opencode_prompt(
+        if isinstance(self.backend, CLIAgentBackend):
+            prompt = build_cli_agent_prompt(
                 instruction=instruction_body, task=task, kind=kind,
             )
             system_prompt = None

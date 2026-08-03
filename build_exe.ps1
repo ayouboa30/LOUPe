@@ -19,6 +19,7 @@ python -m PyInstaller `
   --collect-all llama_cpp `
   --collect-all winrt `
   --collect-all winocr `
+  --collect-all pypdf `
   --hidden-import psutil `
   desktop_app.py
 

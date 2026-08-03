@@ -38,8 +38,7 @@ const state = {
   config: null,
   sessionId: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()),
   running: false,
-  tempHistory: [], // [{cycle, heuristic, critic, writer}]
-  debateEntries: [],
+  documents: [], // [{id, name, text, included, loading}]
 };
 
 const el = (id) => document.getElementById(id);
@@ -60,10 +59,6 @@ const tokensRange = el("tokens-range");
 const tokensValue = el("tokens-value");
 const kindSelect = el("kind-select");
 const newChatBtn = el("new-chat");
-const panelStatus = el("panel-status");
-const panelSources = el("panel-sources");
-const panelDebate = el("panel-debate");
-const tempChart = el("temp-chart");
 
 // ---------------------------------------------------------------- markdown
 
@@ -218,84 +213,245 @@ function errorInAssistantMessage(wrap, message) {
 }
 
 // ---------------------------------------------------------------- side panel
+//
+// Replaced the old debug view (live vote states, per-cycle debate excerpts,
+// a temperature-prior chart) with two things people actually asked to use:
+// attaching documents as context, and saving/reloading past discussions.
+// The panel itself is collapsible - closed state persisted so it stays
+// out of the way once dismissed.
 
-function resetSidePanel() {
-  panelStatus.textContent = "Aucune execution pour l'instant.";
-  panelStatus.className = "muted";
-  panelSources.innerHTML = "Aucune source pour l'instant.";
-  panelSources.className = "muted";
-  panelDebate.innerHTML = "Rien a afficher pour l'instant.";
-  panelDebate.className = "muted";
-  state.debateEntries = [];
+const documentListEl = el("document-list");
+const discussionListEl = el("discussion-list");
+const sidePanelEl = el("side-panel");
+const sidePanelToggleEl = el("side-panel-toggle");
+
+function setSidePanelCollapsed(collapsed) {
+  document.body.classList.toggle("side-panel-collapsed", collapsed);
+  sidePanelToggleEl.hidden = !collapsed;
+  try {
+    localStorage.setItem("3loop_side_panel_collapsed", collapsed ? "1" : "0");
+  } catch {
+    /* ignore */
+  }
 }
 
-function setVotePanel(votes) {
-  const rows = Object.entries(ROLE_META)
-    .map(([role, meta]) => {
-      const vote = votes[role];
-      let text = "en attente";
-      let dotColor = "var(--text-faint)";
-      if (vote) {
-        text = vote.resolved ? `résolu (${Math.round(vote.confidence * 100)}%)` : `à revoir (${Math.round(vote.confidence * 100)}%)`;
-        dotColor = vote.resolved ? "var(--ok)" : "var(--warn)";
-      }
-      const resolvedClass = vote && vote.resolved ? " resolved" : "";
-      return `<div class="vote-row${resolvedClass}"><span class="vote-role"><span class="vote-dot" style="background:${dotColor}"></span>${meta.label}</span><span>${text}</span></div>`;
-    })
-    .join("");
-  panelStatus.innerHTML = rows;
-  panelStatus.className = "";
+el("side-panel-close").addEventListener("click", () => setSidePanelCollapsed(true));
+sidePanelToggleEl.addEventListener("click", () => setSidePanelCollapsed(false));
+try {
+  setSidePanelCollapsed(localStorage.getItem("3loop_side_panel_collapsed") === "1");
+} catch {
+  /* ignore */
 }
 
-function appendDebateEntry(role, cycle, content) {
-  const meta = roleMeta(role);
-  state.debateEntries.push({ role, meta, cycle, content });
-  panelDebate.className = "";
-  panelDebate.innerHTML = state.debateEntries
+// ---- documents (RAG-lite: attach files, fold their text into the prompt) --
+
+function renderDocumentList() {
+  if (state.documents.length === 0) {
+    documentListEl.className = "doc-list muted";
+    documentListEl.innerHTML = "Aucun document.";
+    return;
+  }
+  documentListEl.className = "doc-list";
+  documentListEl.innerHTML = state.documents
     .map(
-      (e) =>
-        `<div class="debate-entry"><span class="role"><span class="vote-dot" style="background:${e.meta.color}"></span>${e.meta.label}</span> - cycle ${e.cycle}<br/>${escapeHtml((e.content || "").slice(0, 220))}${(e.content || "").length > 220 ? "..." : ""}</div>`
+      (doc) => `
+      <div class="doc-item">
+        <label class="doc-check">
+          <input type="checkbox" data-doc-id="${doc.id}" ${doc.included ? "checked" : ""} />
+          <span class="doc-name" title="${escapeHtml(doc.name)}">${escapeHtml(doc.name)}</span>
+        </label>
+        <span class="doc-meta">${doc.text.length.toLocaleString("fr-FR")} car.</span>
+        <button type="button" class="doc-remove" data-doc-remove="${doc.id}" aria-label="Retirer">×</button>
+      </div>`
     )
     .join("");
 }
 
-function setSourcesPanel(sources) {
-  if (!sources || sources.length === 0) return;
-  panelSources.className = "";
-  panelSources.innerHTML = sources
-    .map((s) => `<div><a href="${s.url}" target="_blank" rel="noopener">${escapeHtml(s.title)}</a></div>`)
+documentListEl.addEventListener("change", (event) => {
+  const id = event.target.dataset.docId;
+  if (!id) return;
+  const doc = state.documents.find((d) => d.id === id);
+  if (doc) doc.included = event.target.checked;
+});
+
+documentListEl.addEventListener("click", (event) => {
+  const id = event.target.dataset.docRemove;
+  if (!id) return;
+  state.documents = state.documents.filter((d) => d.id !== id);
+  renderDocumentList();
+});
+
+el("document-input").addEventListener("change", async (event) => {
+  const files = [...event.target.files];
+  event.target.value = ""; // allow re-picking the same file later
+  for (const file of files) {
+    await attachDocument(file);
+  }
+});
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",", 2)[1]);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function attachDocument(file) {
+  const placeholderId = `doc_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  state.documents.push({ id: placeholderId, name: file.name, text: "", included: true, loading: true });
+  renderDocumentList();
+  try {
+    const content_base64 = await fileToBase64(file);
+    const response = await fetch("/api/documents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: file.name, content_base64 }),
+    });
+    const payload = await response.json();
+    const entry = state.documents.find((d) => d.id === placeholderId);
+    if (!entry) return; // removed while uploading
+    if (payload.error) {
+      state.documents = state.documents.filter((d) => d.id !== placeholderId);
+      errorInAssistantMessage(addAssistantMessage(), `Document "${file.name}": ${payload.error}`);
+    } else {
+      entry.text = payload.text;
+      entry.loading = false;
+    }
+  } catch (err) {
+    state.documents = state.documents.filter((d) => d.id !== placeholderId);
+    errorInAssistantMessage(addAssistantMessage(), `Document "${file.name}": ${err}`);
+  }
+  renderDocumentList();
+}
+
+function attachedDocumentsContext() {
+  const included = state.documents.filter((d) => d.included && d.text && !d.loading);
+  if (included.length === 0) return "";
+  return included
+    .map((d) => `Document "${d.name}":\n---\n${d.text}\n---`)
+    .join("\n\n");
+}
+
+// ---- discussions (save / reload / delete past conversations) -------------
+
+function loadDiscussions() {
+  try {
+    return JSON.parse(localStorage.getItem("3loop_discussions") || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveDiscussions(list) {
+  try {
+    localStorage.setItem("3loop_discussions", JSON.stringify(list));
+  } catch {
+    /* ignore: e.g. storage quota - the in-memory list still works this session */
+  }
+}
+
+function renderDiscussionList() {
+  const discussions = loadDiscussions();
+  if (discussions.length === 0) {
+    discussionListEl.className = "doc-list muted";
+    discussionListEl.innerHTML = "Aucune discussion sauvegardée.";
+    return;
+  }
+  discussionListEl.className = "doc-list";
+  discussionListEl.innerHTML = discussions
+    .slice()
+    .reverse()
+    .map(
+      (d) => `
+      <div class="doc-item">
+        <button type="button" class="doc-name doc-name-btn" data-discussion-load="${d.id}" title="Recharger">
+          ${escapeHtml(d.title)}
+        </button>
+        <span class="doc-meta">${new Date(d.savedAt).toLocaleDateString("fr-FR")}</span>
+        <button type="button" class="doc-remove" data-discussion-export="${d.id}" aria-label="Exporter en .md" title="Exporter en .md">⇩</button>
+        <button type="button" class="doc-remove" data-discussion-remove="${d.id}" aria-label="Supprimer">×</button>
+      </div>`
+    )
     .join("");
 }
 
-// ---------------------------------------------------------------- temp chart
+el("save-discussion").addEventListener("click", () => {
+  const messages = [...messagesEl.querySelectorAll(".msg")]
+    .map((node) => ({
+      role: node.classList.contains("user") ? "user" : "assistant",
+      text: node.querySelector(".msg-content")?.innerText.trim() || "",
+    }))
+    .filter((m) => m.text);
+  if (messages.length === 0) return;
+  const firstUserMessage = messages.find((m) => m.role === "user");
+  const discussions = loadDiscussions();
+  discussions.push({
+    id: `disc_${Date.now()}`,
+    title: (firstUserMessage ? firstUserMessage.text : "Discussion").slice(0, 60),
+    savedAt: new Date().toISOString(),
+    messages,
+  });
+  saveDiscussions(discussions);
+  renderDiscussionList();
+});
 
-function pushTempPoint(cycle, posterior) {
-  state.tempHistory.push({ cycle, ...posterior });
-  drawTempChart();
+discussionListEl.addEventListener("click", (event) => {
+  const loadId = event.target.dataset.discussionLoad;
+  const removeId = event.target.dataset.discussionRemove;
+  const exportId = event.target.dataset.discussionExport;
+  const discussions = loadDiscussions();
+
+  if (loadId) {
+    const discussion = discussions.find((d) => d.id === loadId);
+    if (!discussion) return;
+    clearEmptyState();
+    messagesEl.innerHTML = "";
+    for (const message of discussion.messages) {
+      const wrap = document.createElement("div");
+      wrap.className = `msg ${message.role}`;
+      wrap.innerHTML = `
+        <div class="msg-avatar">${message.role === "user" ? "Toi" : mascotSvg(24)}</div>
+        <div class="msg-body"><div class="msg-content">${renderMarkdown(message.text)}</div></div>`;
+      messagesEl.appendChild(wrap);
+      renderMathIn(wrap.querySelector(".msg-content"));
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  } else if (removeId) {
+    saveDiscussions(discussions.filter((d) => d.id !== removeId));
+    renderDiscussionList();
+  } else if (exportId) {
+    const discussion = discussions.find((d) => d.id === exportId);
+    if (!discussion) return;
+    exportDiscussionAsMarkdown(discussion);
+  }
+});
+
+function exportDiscussionAsMarkdown(discussion) {
+  // Plain markdown, not JSON: this is meant to be handed to another tool
+  // (Claude Code, Codex, OpenCode GO...) as context to resume with - a
+  // transcript is exactly the shape a coding-agent CLI reads well.
+  const lines = [
+    `# ${discussion.title}`,
+    "",
+    `_Discussion 3loop sauvegardée le ${new Date(discussion.savedAt).toLocaleString("fr-FR")}._`,
+    "",
+  ];
+  for (const message of discussion.messages) {
+    lines.push(message.role === "user" ? "## Question" : "## Réponse", "", message.text, "");
+  }
+  const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `3loop-${discussion.id}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
 }
 
-function drawTempChart() {
-  const w = 260, h = 110, pad = 8;
-  const tmin = 0.2, tmax = 0.7;
-  const points = state.tempHistory;
-  if (points.length === 0) {
-    tempChart.innerHTML = "";
-    return;
-  }
-  const n = Math.max(points.length - 1, 1);
-  const scaleX = (i) => pad + (i / n) * (w - pad * 2);
-  const scaleY = (v) => h - pad - ((v - tmin) / (tmax - tmin)) * (h - pad * 2);
-
-  const seriesFor = (key) =>
-    points.map((p, i) => `${scaleX(i)},${scaleY(p[key] ?? tmin)}`).join(" ");
-
-  const colors = { heuristic: "var(--heuristic)", critic: "var(--critic)", writer: "var(--writer)" };
-  let svg = "";
-  for (const key of ["heuristic", "critic", "writer"]) {
-    svg += `<polyline points="${seriesFor(key)}" fill="none" stroke="${colors[key]}" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>`;
-  }
-  tempChart.innerHTML = svg;
-}
+renderDocumentList();
+renderDiscussionList();
 
 // ---------------------------------------------------------------- config / backend selection
 
@@ -313,6 +469,14 @@ function populateBackendOptions() {
   // user has configured.
   if (opencode.available) {
     options.push({ value: "opencode", label: "OpenCode (le plus capable)" });
+  }
+  const claudeCode = state.config.claude_code || { available: false };
+  if (claudeCode.available) {
+    options.push({ value: "claude_code", label: "Claude Code" });
+  }
+  const codex = state.config.codex || { available: false };
+  if (codex.available) {
+    options.push({ value: "codex", label: "Codex" });
   }
   for (const [key, info] of Object.entries(state.config.cloud_providers)) {
     options.push({ value: key, label: key === "groq" ? "Groq (cloud gratuit)" : "NVIDIA Nemotron (cloud gratuit)" });
@@ -381,6 +545,20 @@ function updateBackendUI() {
     backendHint.textContent =
       "Delegue a OpenCode installe sur ta machine (processus externe, sans fenetre). Journal : " +
       (opencode.log_path || "~/.3loop/opencode.log");
+    backendHint.className = "hint";
+  } else if (backend === "claude_code" || backend === "codex") {
+    apiKeySection.hidden = true;
+    const info = state.config[backend] || { models: [], default: "" };
+    modelSelect.innerHTML = info.models
+      .map((m) => {
+        const label = m || "(par defaut de la CLI)";
+        return `<option value="${escapeHtml(m)}"${m === info.default ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    const label = backend === "claude_code" ? "Claude Code" : "Codex";
+    backendHint.textContent =
+      `Delegue a ${label} installe sur ta machine (processus externe, sans fenetre, ` +
+      `execution en lecture seule - aucun fichier modifie). Journal : ~/.3loop/${backend === "claude_code" ? "claude-code" : "codex"}.log`;
     backendHint.className = "hint";
   } else if (backend === "llama_cpp") {
     apiKeySection.hidden = true;
@@ -455,9 +633,6 @@ newChatBtn.addEventListener("click", () => {
       <p>Heuristique → Critique → Rédacteur → Vote de consensus.<br/>Pose une question de code, de maths, ou une recherche.</p>
     </div>`;
   document.getElementById("empty-badge").innerHTML = mascotSvg(56);
-  state.tempHistory = [];
-  drawTempChart();
-  resetSidePanel();
 });
 
 // ---------------------------------------------------------------- run + SSE
@@ -470,7 +645,6 @@ function currentBackendLabel() {
 async function runPrompt(prompt, enginePrompt = prompt) {
   addUserMessage(prompt);
   const wrap = addAssistantMessage();
-  resetSidePanel();
   const votes = {};
 
   const payload = {
@@ -556,21 +730,13 @@ function handleSseEvent(rawEvent, wrap, votes, payload) {
     case "vote":
       if (data.role) {
         votes[data.role] = { resolved: data.resolved, confidence: data.confidence };
-        setVotePanel(votes);
         updateThinkingStatus(wrap, `${roleMeta(data.role).label} a vote (cycle ${data.cycle})…`);
       }
       break;
     case "agent_output":
       if (data.role) {
-        appendDebateEntry(data.role, data.cycle, data.content);
         updateThinkingStatus(wrap, `${roleMeta(data.role).label} a repondu, etape suivante…`);
       }
-      break;
-    case "research_sources":
-      setSourcesPanel(data.sources);
-      break;
-    case "prior_updated":
-      if (data.posterior) pushTempPoint(data.cycle, data.posterior);
       break;
     case "run_completed":
       finalizeAssistantMessage(wrap, {
@@ -636,6 +802,7 @@ composerEl.addEventListener("submit", async (event) => {
 
   const urlMatch = text.match(URL_RE);
   let enginePrompt = text;
+  const originalPlaceholder = promptInput.placeholder;
 
   try {
     if (urlMatch) {
@@ -652,16 +819,20 @@ composerEl.addEventListener("submit", async (event) => {
         `Question de l'utilisateur: ${question}`;
       updateStatus("");
     }
+    const documentsContext = attachedDocumentsContext();
+    if (documentsContext) {
+      enginePrompt = `${documentsContext}\n\nQuestion de l'utilisateur: ${enginePrompt}`;
+    }
     await runPrompt(text, enginePrompt);
   } finally {
     state.running = false;
     sendBtn.disabled = promptInput.value.trim().length === 0;
+    promptInput.placeholder = originalPlaceholder;
   }
 });
 
 function updateStatus(text) {
-  panelStatus.textContent = text || "Aucune execution pour l'instant.";
-  panelStatus.className = text ? "" : "muted";
+  promptInput.placeholder = text || "Écris ton message…";
 }
 
 // ---------------------------------------------------------------- boot

@@ -61,6 +61,7 @@ body {
      to it, which is what let a long conversation overflow unreachably. */
   grid-template-rows: minmax(0, 1fr);
   height: 100vh;
+  transition: grid-template-columns 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ---------- glass helpers ---------- */
@@ -642,38 +643,112 @@ details.advanced select { margin-top: 4px; }
 .panel-card a { color: var(--accent); text-decoration: none; font-size: 12.5px; }
 .panel-card a:hover { text-decoration: underline; }
 
-.vote-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12.5px;
-  padding: 5px 0;
-  border-bottom: 1px solid var(--border-soft);
-  animation: msg-in 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-}
-.vote-row:last-child { border-bottom: none; }
-.vote-role { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
-.vote-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  box-shadow: 0 0 6px currentColor;
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.3s ease;
-}
-.vote-row.resolved .vote-dot { transform: scale(1.25); }
+/* ---------- Documents & discussions (replaced the debug panel) ---------- */
 
-.debate-entry {
-  font-size: 12.5px;
-  line-height: 1.55;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--border-soft);
+.panel-hint {
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+}
+
+.btn-upload {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px dashed var(--border);
+  background: transparent;
   color: var(--text-dim);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+  margin-bottom: 10px;
 }
-.debate-entry:last-child { border-bottom: none; }
-.debate-entry .role { font-weight: 600; color: var(--text); display: inline-flex; align-items: center; gap: 6px; }
-.debate-entry .role .vote-dot { flex: none; }
+.btn-upload:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
 
-.temp-chart { width: 100%; height: 100px; }
+.doc-list { display: flex; flex-direction: column; gap: 6px; }
+.doc-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-soft);
+  font-size: 12px;
+  animation: msg-in 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.doc-check { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; cursor: pointer; }
+.doc-check input { flex: none; }
+.doc-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.doc-name-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  flex: 1;
+  min-width: 0;
+}
+.doc-name-btn:hover { color: var(--accent); text-decoration: underline; }
+.doc-meta { flex: none; color: var(--text-faint); font-size: 10.5px; }
+.doc-remove {
+  flex: none;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.doc-remove:hover { color: var(--danger); background: rgba(252, 165, 165, 0.12); }
+
+/* ---------- Side panel collapse ---------- */
+
+.side-panel-close {
+  align-self: flex-end;
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 8px;
+  display: flex;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.side-panel-close:hover { color: var(--text); background: var(--accent-soft); }
+
+.side-panel-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 20;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 10px;
+  padding: 8px;
+  cursor: pointer;
+  display: flex;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: color 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.side-panel-toggle:hover { color: var(--text); border-color: var(--accent); transform: translateX(-2px); }
+
+body.side-panel-collapsed .app { grid-template-columns: 264px 1fr 0; }
+body.side-panel-collapsed .side-panel { display: none; }
 
 /* scrollbars */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -683,4 +758,5 @@ details.advanced select { margin-top: 4px; }
 @media (max-width: 980px) {
   .app { grid-template-columns: 220px 1fr; }
   .side-panel { display: none; }
+  .side-panel-toggle { display: none; }
 }

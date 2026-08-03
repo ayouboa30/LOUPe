@@ -20,11 +20,13 @@ classifiers = [
 web = ["httpx>=0.27"]
 # Desktop app: pywebview renders the UI, Pillow/numpy draw the floating
 # widget, psutil reports physical (not logical) core count for llama.cpp.
-desktop = ["pywebview>=5.0", "pillow>=10.0", "numpy>=1.24", "psutil>=5.9"]
+desktop = ["pywebview>=5.0", "pillow>=10.0", "numpy>=1.24", "psutil>=5.9", "pypdf>=4.0"]
 llama = ["llama-cpp-python>=0.2.80"]
 airllm = ["airllm>=2.0"]
 litellm = ["litellm>=1.40"]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+# reportlab is test-only: it generates the synthetic PDFs used to verify
+# extract_text() actually reads a real PDF rather than assuming pypdf works.
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "reportlab>=4.0"]
 
 [project.scripts]
 3loop = "three_loop.cli:main"
