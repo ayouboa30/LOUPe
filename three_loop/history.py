@@ -36,6 +36,12 @@ class ConversationHistory:
             HistoryEntry(turn.cycle, turn.role.label, turn.content)
         )
 
+    def add_conversation(self, content: str) -> None:
+        """Seed the debate with turns from the user's previous chat messages."""
+
+        if content.strip():
+            self._entries.append(HistoryEntry(0, "Conversation precedente", content))
+
     def add_query(self, cycle: int, role: AgentRole, query: str) -> None:
         """Record a web query without treating it as a solution turn."""
 

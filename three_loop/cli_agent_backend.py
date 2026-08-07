@@ -1,48 +1,50 @@
-"""Shared machinery for backends that delegate to an external coding-agent CLI.
+"""Shared machinery for locally installed coding-agent CLI backends.
 
-Extracted from what was originally OpenCode-only code once two more CLIs
-(Claude Code, Codex) needed the exact same shape: locate the executable,
-run it windowless with the prompt on stdin (never as a CLI argument - a
-multi-hundred-char argument with quotes/backslashes/newlines gets corrupted
-by Windows batch-file shims, measured on OpenCode's own ``.cmd``), isolate
-it from the user's real files, log every invocation, and build a prompt
-that states the job in plain prose instead of 3loop's internal protocol
-markers (which read to a coding agent as a project to go inspect - measured
-on OpenCode: asked a maths question, it described this repo's pipeline.py).
-
-Each subclass only supplies its own argv and its own output parser; the
-process plumbing here is identical across all three.
+The regular path is deliberately conservative: every CLI runs in an isolated
+workspace and has no write permission. A user can explicitly opt into a real
+project directory for a coding task; only then does the backend keep the child
+process interactive and relay clear permission/input requests back to LOUPe.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import os
+import queue
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from .backend import SharedLLMBackend
 from .models import SourceMatch, TaskKind
 from .skills import load_skill
 
 #: Windows-only flag that starts the child without allocating a console.
-#: Without it every call flashes a black window over whatever the user is
-#: doing; it does not make the process any less visible to Task Manager.
 _CREATE_NO_WINDOW = 0x08000000
+
+#: OpenCode persists session/provider state in a process-wide SQLite database.
+#: Separate HTTP requests create separate backend instances, so an asyncio lock
+#: on one instance is not enough: concurrent CLI children can still contend on
+#: that database and fail with "database is locked". Keep all local coding CLI
+#: processes single-file at the host process boundary; this does not touch user
+#: data and only queues the already-running requests.
+_CLI_PROCESS_LOCK = threading.Lock()
+_CLI_LOCK_RETRIES = 3
+_CLI_LOCK_RETRY_DELAY_SECONDS = 1.0
 
 
 def find_executable(name: str, *extra_candidates: Path) -> str | None:
-    """Locate a CLI on PATH, falling back to common npm/user-install paths.
-
-    ``shutil.which`` alone misses npm's Windows ``.cmd`` shims often enough
-    (depends on ``PATHEXT``) that OpenCode detection needed this fallback;
-    the same candidates are worth checking for any Node-based agent CLI.
-    """
+    """Locate a CLI on PATH, with common npm/user-install fallbacks."""
 
     found = shutil.which(name)
     if found:
@@ -61,14 +63,7 @@ def find_executable(name: str, *extra_candidates: Path) -> str | None:
 
 
 def _workspace(agent_name: str) -> Path:
-    """An empty directory to run the agent CLI in.
-
-    Defence in depth: the CLI's own sandbox/permission flags limit what it
-    can reach, this limits what it starts out able to see. Running in the
-    user's project directory would put their real files one bad completion
-    away from a file-touching tool. Each agent gets its own subdirectory so
-    a crash-looping one can't fill another's.
-    """
+    """Return an empty, per-agent workspace for read-only requests."""
 
     path = Path.home() / ".3loop" / f"{agent_name}-workspace"
     try:
@@ -78,8 +73,28 @@ def _workspace(agent_name: str) -> Path:
     return path
 
 
+def _resolve_workspace(
+    agent_name: str,
+    *,
+    allow_writes: bool,
+    workspace_path: str | Path | None,
+) -> Path:
+    """Return the isolated workspace or the explicitly approved project dir."""
+
+    if not allow_writes:
+        return _workspace(agent_name)
+    if not workspace_path:
+        raise ValueError("Un dossier de travail est obligatoire en mode écriture.")
+    candidate = Path(workspace_path).expanduser().resolve()
+    if not candidate.is_dir():
+        raise ValueError(f"Dossier de travail introuvable : {candidate}")
+    if candidate.parent == candidate:
+        raise ValueError("Le mode écriture ne peut pas viser la racine du disque.")
+    return candidate
+
+
 def _append_log(agent_name: str, text: str) -> None:
-    """Record one invocation. Failures here must never break a run."""
+    """Record one invocation. Logging failures must never break a run."""
 
     try:
         path = Path.home() / ".3loop" / f"{agent_name}.log"
@@ -90,15 +105,18 @@ def _append_log(agent_name: str, text: str) -> None:
         pass
 
 
-#: Appended as the last paragraph, never as the opening one: tried as an
-#: opening constraint on OpenCode it got answered rather than followed
-#: ("Understood, what is your question?"). As a trailing note on a task the
-#: agent has already read in full, it is obeyed. Applies equally to any
-#: file-touching coding CLI, not just OpenCode.
 _NO_FILES_CONSTRAINT = (
     "Contrainte: reponds uniquement a partir de tes connaissances, sans "
     "consulter, explorer ni modifier aucun fichier. Renvoie uniquement "
     "l'objet JSON demande, rien d'autre."
+)
+
+_WRITABLE_FILES_CONSTRAINT = (
+    "Mode execution autorise: travaille uniquement dans le dossier de travail "
+    "fourni par l'hote. Tu peux lire les fichiers necessaires et modifier les "
+    "fichiers demandes par la tache. N'accede pas a un autre dossier, ne "
+    "supprime pas de donnees sans le demander, et termine par un resume court "
+    "des fichiers modifies et des verifications effectuees."
 )
 
 
@@ -110,25 +128,10 @@ def build_cli_agent_prompt(
     history: str = "",
     sources: Sequence[SourceMatch] = (),
     research_digest: str = "",
+    allow_writes: bool = False,
+    workspace_path: str = "",
 ) -> str:
-    """Build a prompt from scratch for a CLI coding-agent backend.
-
-    Deliberately a separate template from ``prompting.build_prefix``/
-    ``with_role`` rather than a transformation of their output. That local
-    template is shaped to help llama.cpp reuse its KV prefix, a concern
-    that does not exist for a fresh agent subprocess invocation; and its
-    ``3LOOP_ACTION=...`` protocol markers read, to a coding agent, as the
-    name of a project to go inspect.
-
-    Two things were measured necessary (on OpenCode) to get a real answer
-    instead of a clarifying question or an invented schema:
-
-    * ``instruction`` must open the message and state the job in plain
-      prose - a heading-like opener ("FORMATTING RULES:") gets answered
-      ("What formatting rules would you like?") instead of acted on.
-    * the file-access constraint must close the message, not open it, for
-      the same reason.
-    """
+    """Build a plain-language prompt suitable for a fresh CLI subprocess."""
 
     parts = [instruction.strip()]
     skill = load_skill(kind)
@@ -138,28 +141,121 @@ def build_cli_agent_prompt(
     if research_digest.strip():
         parts.append(f"Resume de recherche:\n{research_digest.strip()}")
     elif sources:
-        parts.append(
-            "Sources:\n" + "\n".join(f"- {source.url}" for source in sources)
-        )
+        parts.append("Sources:\n" + "\n".join(f"- {source.url}" for source in sources))
     if history.strip() and not history.startswith("(Aucun historique"):
         parts.append(f"Cycles precedents:\n{history}")
-    parts.append(_NO_FILES_CONSTRAINT)
+    constraint = _WRITABLE_FILES_CONSTRAINT if allow_writes else _NO_FILES_CONSTRAINT
+    if allow_writes and workspace_path.strip():
+        constraint += f" Dossier autorise: {workspace_path.strip()}."
+    parts.append(constraint)
     return "\n\n".join(parts)
 
 
-class CLIAgentBackend(SharedLLMBackend):
-    """Base for backends that run one completion per call through a CLI agent.
+def _interaction_text(value: Any) -> str:
+    """Find a short human-facing question in a structured CLI event."""
 
-    ``serialize_requests=False``: each call is its own short-lived process
-    talking to a remote API, so they can overlap the way any HTTP backend
-    does. No session/conversation is carried between calls - each call
-    already carries the task and history it needs via
-    ``build_cli_agent_prompt``, and a carried-over agent session would
-    duplicate that context on top.
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("question", "prompt", "message", "text", "reason", "description"):
+        candidate = value.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _cli_interaction_from_line(line: str, *, channel: str) -> dict[str, Any] | None:
+    """Recognise explicit permission/input events without mistaking prose for one.
+
+    There is no shared interactive wire protocol across OpenCode, Claude Code
+    and Codex. This recognises only unambiguous structured event kinds or a
+    traditional confirmation prompt. Everything else remains normal CLI output.
     """
 
-    #: Short name used for the workspace directory and log file
-    #: (e.g. "opencode", "claude-code", "codex").
+    stripped = line.strip()
+    if not stripped:
+        return None
+    event: dict[str, Any] | None = None
+    try:
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            event = parsed
+    except json.JSONDecodeError:
+        pass
+
+    if event is not None:
+        candidates: list[str] = []
+        for value in (event.get("type"), event.get("subtype"), event.get("kind")):
+            if isinstance(value, str):
+                candidates.append(value.lower())
+        for key in ("request", "item", "permission", "approval"):
+            nested = event.get(key)
+            if isinstance(nested, dict):
+                for value in (nested.get("type"), nested.get("subtype"), nested.get("kind")):
+                    if isinstance(value, str):
+                        candidates.append(value.lower())
+        markers = (
+            "permission", "approval", "approve", "question", "input_required",
+            "tool_confirmation", "can_use_tool", "command_execution_request",
+            "file_change_request", "user_input",
+        )
+        if not any(any(marker in candidate for marker in markers) for candidate in candidates):
+            return None
+        question = _interaction_text(event)
+        if not question:
+            for key in ("request", "item", "permission", "approval"):
+                question = _interaction_text(event.get(key))
+                if question:
+                    break
+        if not question:
+            question = "Le CLI demande une décision avant de continuer."
+        permission_markers = ("permission", "approval", "approve", "can_use_tool", "confirmation")
+        kind = "permission" if any(
+            any(marker in candidate for marker in permission_markers)
+            for candidate in candidates
+        ) else "question"
+        return {
+            "interaction_id": f"cli_{uuid.uuid4().hex}",
+            "kind": kind,
+            "question": question[:4000],
+            "channel": channel,
+            "protocol": "json",
+        }
+
+    lowered = stripped.lower()
+    has_prompt_shape = "?" in stripped or bool(
+        re.search(r"\[\s*[yn](?:/[yn])?\s*\]", lowered)
+    )
+    has_interaction_word = bool(
+        re.search(
+            r"\b(permission|approve|approval|allow|autoris\w*|confirm\w*|continue|answer|repond\w*)\b",
+            lowered,
+        )
+    )
+    if not has_prompt_shape or not has_interaction_word:
+        return None
+    kind = "permission" if re.search(
+        r"\b(permission|approve|approval|allow|autoris\w*|confirm\w*)\b", lowered
+    ) else "question"
+    return {
+        "interaction_id": f"cli_{uuid.uuid4().hex}",
+        "kind": kind,
+        "question": stripped[:4000],
+        "channel": channel,
+        "protocol": "text",
+    }
+
+
+class CLIAgentBackend(SharedLLMBackend):
+    """Base for backends that delegate one completion to a local coding CLI.
+
+    Read-only calls remain short-lived, stdin-closed subprocesses. Interactive
+    handling is enabled only in an explicit write session: it keeps stdin open
+    and waits for the browser's explicit approval, refusal or free-text reply.
+    No code path auto-approves a tool request.
+    """
+
     agent_name: str = "cli-agent"
 
     def __init__(
@@ -168,6 +264,10 @@ class CLIAgentBackend(SharedLLMBackend):
         *,
         timeout: float = 300.0,
         executable: str | None = None,
+        allow_writes: bool = False,
+        workspace_path: str | Path | None = None,
+        interaction_callback: Callable[[dict[str, Any]], Awaitable[Any] | Any] | None = None,
+        interaction_timeout: float = 120.0,
     ) -> None:
         super().__init__(serialize_requests=False)
         resolved = executable or self.find()
@@ -175,7 +275,11 @@ class CLIAgentBackend(SharedLLMBackend):
             raise RuntimeError(self.not_found_message())
         self.executable = resolved
         self.model = model
-        self.timeout = timeout
+        self.timeout = float(timeout)
+        self.allow_writes = bool(allow_writes)
+        self.workspace_path = str(workspace_path).strip() if workspace_path else ""
+        self.interaction_callback = interaction_callback
+        self.interaction_timeout = max(5.0, float(interaction_timeout))
 
     @classmethod
     @abstractmethod
@@ -187,17 +291,26 @@ class CLIAgentBackend(SharedLLMBackend):
         return f"{cls.agent_name} est introuvable. Installe-le ou verifie qu'il est dans le PATH."
 
     @abstractmethod
-    def build_argv(self) -> list[str]:
-        """CLI arguments (excluding the executable itself and the prompt)."""
+    def build_argv(self, workspace: Path | None = None) -> list[str]:
+        """CLI arguments, excluding the executable and prompt."""
 
     @abstractmethod
     def parse_output(self, stdout: str, stderr: str) -> str:
-        """Extract the answer text from the process output.
+        """Extract answer text from process output without raising on bad output."""
 
-        Must never raise on malformed output - return ``""`` instead, so the
-        caller's "no text" check produces one clear error rather than a
-        traceback.
-        """
+    def _message_for_run(self, prompt: str, workspace: Path) -> str:
+        """Add the matching access constraint when a caller used a generic prompt."""
+
+        message = prompt.rstrip()
+        if self.allow_writes:
+            message = message.replace(_NO_FILES_CONSTRAINT, _WRITABLE_FILES_CONSTRAINT)
+            if _WRITABLE_FILES_CONSTRAINT not in message:
+                message += "\n\n" + _WRITABLE_FILES_CONSTRAINT
+            if f"Dossier autorise: {workspace}." not in message:
+                message += f" Dossier autorise: {workspace}."
+        elif _NO_FILES_CONSTRAINT not in message:
+            message += "\n\n" + _NO_FILES_CONSTRAINT
+        return message
 
     async def _complete(
         self,
@@ -207,64 +320,80 @@ class CLIAgentBackend(SharedLLMBackend):
         system_prompt: str | None,
         max_tokens: int | None,
     ) -> str:
-        # None of these CLIs expose temperature or a token cap on their
-        # non-interactive entry points; provider defaults apply. Both are
-        # honoured by the local backends, so behaviour differs here by
-        # design rather than oversight.
-        #
-        # `system_prompt` is deliberately dropped: these agents already
-        # carry their own, and prepending a second role assignment
-        # ("You are the 3loop compact debate engine...") makes them answer
-        # it conversationally instead of doing the task - measured on
-        # OpenCode. Callers talking to this backend build `prompt` with
-        # `build_cli_agent_prompt`, which needs no such prefix.
+        # Headless CLIs do not consistently expose temperature/token controls;
+        # their native defaults apply. Their own system prompts are retained.
         del temperature, max_tokens, system_prompt
-        message = prompt
-        workspace = str(_workspace(self.agent_name))
+        workspace = _resolve_workspace(
+            self.agent_name,
+            allow_writes=self.allow_writes,
+            workspace_path=self.workspace_path,
+        )
+        message = self._message_for_run(prompt, workspace)
+        event_loop = asyncio.get_running_loop()
+        interactive = self.allow_writes and self.interaction_callback is not None
 
         def invoke() -> str:
             started = time.time()
             try:
-                completed = subprocess.run(
-                    [self.executable, *self.build_argv()],
-                    input=message,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self.timeout,
-                    # The child inherits the parent's working directory
-                    # otherwise, and a code-reading agent will happily walk
-                    # it - measured on OpenCode: it answered a maths
-                    # question by describing this repo's pipeline.py.
-                    cwd=workspace,
-                    creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-                )
+                # The CLI may be constructed once per HTTP request, so the
+                # backend's per-instance asyncio lock cannot protect OpenCode's
+                # shared SQLite state. Serialize the child process itself.
+                with _CLI_PROCESS_LOCK:
+                    if interactive:
+                        stdout, stderr, returncode = self._invoke_interactive(
+                            message, workspace, event_loop
+                        )
+                    else:
+                        completed = None
+                        for attempt in range(_CLI_LOCK_RETRIES + 1):
+                            completed = subprocess.run(
+                                [self.executable, *self.build_argv(workspace)],
+                                input=message,
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                timeout=self.timeout,
+                                cwd=str(workspace),
+                                creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                            )
+                            detail = f"{completed.stdout}\n{completed.stderr}".lower()
+                            if completed.returncode == 0 or "database is locked" not in detail:
+                                break
+                            if attempt < _CLI_LOCK_RETRIES:
+                                time.sleep(_CLI_LOCK_RETRY_DELAY_SECONDS * (attempt + 1))
+                        assert completed is not None
+                        stdout, stderr, returncode = (
+                            completed.stdout,
+                            completed.stderr,
+                            completed.returncode,
+                        )
             except subprocess.TimeoutExpired:
                 _append_log(
                     self.agent_name,
                     f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] TIMEOUT apres "
-                    f"{self.timeout}s modele={self.model}",
+                    f"{self.timeout:.0f}s modele={self.model}",
                 )
                 raise RuntimeError(
                     f"{self.agent_name} n'a pas repondu en {self.timeout:.0f}s."
                 ) from None
             except OSError as exc:
                 _append_log(
-                    self.agent_name, f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERREUR {exc}"
+                    self.agent_name,
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ERREUR {exc}",
                 )
                 raise RuntimeError(f"Impossible de lancer {self.agent_name}: {exc}") from exc
 
+            text = self.parse_output(stdout, stderr)
             elapsed = time.time() - started
-            text = self.parse_output(completed.stdout, completed.stderr)
             _append_log(
                 self.agent_name,
                 f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] modele={self.model} "
-                f"code={completed.returncode} {elapsed:.1f}s "
-                f"prompt={len(message)}c reponse={len(text)}c",
+                f"code={returncode} {elapsed:.1f}s prompt={len(message)}c "
+                f"reponse={len(text)}c writes={int(self.allow_writes)}",
             )
             if not text:
-                detail = (completed.stderr or completed.stdout or "").strip()
+                detail = (stderr or stdout or "").strip()
                 raise RuntimeError(
                     f"{self.agent_name} n'a renvoye aucun texte"
                     + (f": {detail[:300]}" if detail else ".")
@@ -272,3 +401,154 @@ class CLIAgentBackend(SharedLLMBackend):
             return text
 
         return await asyncio.to_thread(invoke)
+
+    def _invoke_interactive(
+        self,
+        message: str,
+        workspace: Path,
+        event_loop: asyncio.AbstractEventLoop,
+    ) -> tuple[str, str, int]:
+        """Keep a write-session child alive while relaying explicit prompts."""
+
+        process = subprocess.Popen(
+            [self.executable, *self.build_argv(workspace)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            cwd=str(workspace),
+            creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+        events: queue.Queue[tuple[str, str]] = queue.Queue()
+        readers: list[threading.Thread] = []
+
+        def collect(stream: Any, channel: str) -> None:
+            try:
+                for line in stream:
+                    events.put((channel, line))
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        for stream, channel in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+            if stream is None:
+                continue
+            reader = threading.Thread(
+                target=collect,
+                args=(stream, channel),
+                daemon=True,
+                name=f"{self.agent_name}-output-{channel}",
+            )
+            reader.start()
+            readers.append(reader)
+
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        try:
+            if process.stdin is not None:
+                process.stdin.write(message + ("" if message.endswith("\n") else "\n"))
+                process.stdin.flush()
+            deadline = time.monotonic() + self.timeout
+            while True:
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    process.wait()
+                    raise subprocess.TimeoutExpired(
+                        [self.executable, *self.build_argv(workspace)], self.timeout
+                    )
+                try:
+                    channel, line = events.get(timeout=0.1)
+                except queue.Empty:
+                    if process.poll() is None:
+                        continue
+                    for reader in readers:
+                        reader.join(timeout=0.5)
+                    while True:
+                        try:
+                            channel, line = events.get_nowait()
+                        except queue.Empty:
+                            break
+                        self._record_cli_line(
+                            channel, line, stdout_parts, stderr_parts, process, event_loop
+                        )
+                    break
+                self._record_cli_line(
+                    channel, line, stdout_parts, stderr_parts, process, event_loop
+                )
+        finally:
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        return "".join(stdout_parts), "".join(stderr_parts), process.wait()
+
+    def _record_cli_line(
+        self,
+        channel: str,
+        line: str,
+        stdout_parts: list[str],
+        stderr_parts: list[str],
+        process: subprocess.Popen[str],
+        event_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if channel == "stdout":
+            stdout_parts.append(line)
+        else:
+            stderr_parts.append(line)
+        request = _cli_interaction_from_line(line, channel=channel)
+        if request is None:
+            return
+        request.update({
+            "agent": self.agent_name,
+            "model": self.model,
+            "allow_writes": True,
+        })
+        answer: Any = {"decision": "deny", "reason": "Aucune interface d'approbation disponible."}
+        if self.interaction_callback is not None:
+            async def ask() -> Any:
+                result = self.interaction_callback(request)
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+
+            future = asyncio.run_coroutine_threadsafe(ask(), event_loop)
+            try:
+                answer = future.result(timeout=self.interaction_timeout)
+            except Exception as exc:
+                future.cancel()
+                answer = {"decision": "deny", "reason": f"Demande expirée ou indisponible: {exc}"}
+        self._write_cli_answer(process, request, answer)
+
+    @staticmethod
+    def _write_cli_answer(
+        process: subprocess.Popen[str], request: dict[str, Any], answer: Any
+    ) -> None:
+        """Write exactly one explicit human decision back to the child stdin."""
+
+        if process.stdin is None:
+            return
+        value = dict(answer) if isinstance(answer, dict) else {"decision": str(answer or "deny")}
+        decision = str(value.get("decision", "")).strip().lower()
+        if request.get("protocol") == "json":
+            payload = dict(value)
+            payload["decision"] = decision or "deny"
+            wire = json.dumps(payload, ensure_ascii=False)
+        else:
+            free_text = str(value.get("answer", "")).strip()
+            if free_text:
+                wire = free_text
+            elif decision in {"approve", "approved", "allow", "yes", "y", "accept"}:
+                wire = "y"
+            else:
+                wire = "n"
+        try:
+            process.stdin.write(wire + "\n")
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass

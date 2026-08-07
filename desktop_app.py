@@ -9,15 +9,23 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
-from three_loop.server import run_server
+# The server import is intentionally delayed until ``main``. In a frozen,
+# windowed build an import-time native DLL failure otherwise happens before
+# ``_log_path`` exists, leaving the user with only a generic Windows
+# LoadLibrary dialog and no diagnostic file.
 
 # The floating mascot is a pure Win32 layered window (ctypes) and the
 # platform-specific bonus features it exposes (WinRT OCR/speech) only exist
@@ -57,7 +65,109 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _open_native_window(url: str, *, port: int) -> bool:
+_OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+_OLLAMA_START_TIMEOUT = 12.0
+_OLLAMA_STOP_TIMEOUT = 5.0
+# This reference is set only after this process has started ``ollama serve``.
+# It must never point at a service that existed before 3loop opened.
+_owned_ollama_process: subprocess.Popen[bytes] | None = None
+
+
+def _ollama_is_available(timeout: float = 0.75) -> bool:
+    """Return whether the standard local Ollama API can list its models."""
+
+    try:
+        with urllib.request.urlopen(_OLLAMA_TAGS_URL, timeout=timeout) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, OSError, TimeoutError):
+        return False
+
+
+def _stop_ollama_process(process: subprocess.Popen[bytes]) -> None:
+    """Stop one owned Ollama child without affecting any other instance."""
+
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+    except OSError as exc:
+        _write_log(f"Impossible d'arrêter l'instance Ollama de 3loop: {exc}\n")
+        return
+    try:
+        process.wait(timeout=_OLLAMA_STOP_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+            process.wait(timeout=_OLLAMA_STOP_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _write_log(f"L'instance Ollama de 3loop ne s'est pas arrêtée: {exc}\n")
+
+
+def _stop_owned_ollama_server() -> None:
+    """Release only the Ollama service that this 3loop process started."""
+
+    global _owned_ollama_process
+    process, _owned_ollama_process = _owned_ollama_process, None
+    if process is not None:
+        _stop_ollama_process(process)
+
+
+def _ensure_ollama_server() -> bool:
+    """Start the standard local Ollama service once, before opening 3loop.
+
+    The bundled app intentionally does not ship model weights or ``ollama``.
+    It only starts the user-installed local runtime when its normal API is
+    absent. A pre-existing system service is reused untouched, and a missing
+    executable never prevents the rest of the application from opening. When
+    3loop starts the service itself, the child process is remembered and is
+    stopped again when the user actually quits the desktop app.
+    """
+
+    global _owned_ollama_process
+    if _ollama_is_available():
+        return True
+
+    executable = shutil.which("ollama")
+    if executable is None:
+        _write_log("Ollama introuvable dans PATH; les modèles locaux sont indisponibles.\n")
+        return False
+
+    try:
+        process = subprocess.Popen(
+            [executable, "serve"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        _write_log(f"Impossible de démarrer Ollama automatiquement: {exc}\n")
+        return False
+
+    deadline = time.monotonic() + _OLLAMA_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if _ollama_is_available():
+            # Keeping the Popen reference is the proof that 3loop owns this
+            # child. A service that was already reachable never reaches here.
+            if process.poll() is None:
+                _owned_ollama_process = process
+            return True
+        if process.poll() is not None:
+            _write_log("Ollama s'est arrêté avant d'exposer son API locale.\n")
+            return False
+        time.sleep(0.2)
+
+    _stop_ollama_process(process)
+    _write_log("Ollama n'a pas répondu dans le délai de démarrage.\n")
+    return False
+
+
+def _open_native_window(
+    url: str,
+    *,
+    port: int,
+    on_quit: Callable[[], None] | None = None,
+) -> bool:
     """Try the embedded WebView2 window. Return False if it could not run."""
 
     try:
@@ -68,7 +178,7 @@ def _open_native_window(url: str, *, port: int) -> bool:
 
     try:
         main_window = webview.create_window(
-            "3loop",
+            "LOUPe beta 0.1",
             url,
             width=1360,
             height=880,
@@ -112,18 +222,23 @@ def _open_native_window(url: str, *, port: int) -> bool:
             # Right-click on the mascot is the only way to actually quit,
             # since the main window no longer does: it destroys the widget's
             # own window (ending its message loop) and then tears the whole
-            # process down. os._exit rather than a graceful webview.destroy()
-            # + return, because at this point the user has explicitly asked
-            # to end the app and there is nothing left worth waiting on
-            # (daemon threads: the engine server, any in-flight background
-            # prompt) - a clean shutdown path would just be dead code we'd
-            # never verified to fully unblock webview.start().
+            # process down.
             def _quit_app() -> None:
                 try:
                     main_window.destroy()
-                except Exception:
-                    pass
-                os._exit(0)
+                finally:
+                    if on_quit is not None:
+                        try:
+                            on_quit()
+                        except Exception:
+                            _write_log(
+                                "Nettoyage Ollama à la fermeture impossible:\n"
+                                f"{traceback.format_exc()}"
+                            )
+                    # The engine server remains a daemon thread and must not
+                    # survive an explicit desktop quit after its owned Ollama
+                    # child has been stopped above.
+                    os._exit(0)
 
             NativeWidget(_open_main, port=port, on_close=_quit_app).start()
 
@@ -138,30 +253,43 @@ def main() -> None:
     """Start the local engine server, then open the app window or a browser tab."""
 
     try:
+        # Local model selection depends on Ollama's standard API. Start the
+        # user-installed service before /api/config is first requested, so the
+        # model selector is populated on the app's first paint rather than
+        # requiring a separate terminal command and a manual page reload.
+        _ensure_ollama_server()
+
+        # Keep this import inside the guarded startup path so native import
+        # failures are written next to the executable instead of disappearing
+        # before the windowed process can initialize logging.
+        from three_loop.server import run_server
+
         port = _free_port()
         threading.Thread(target=run_server, args=(port,), daemon=True).start()
         time.sleep(0.3)
         url = f"http://127.0.0.1:{port}/"
 
-        if _open_native_window(url, port=port):
+        if _open_native_window(url, port=port, on_quit=_stop_owned_ollama_server):
             return
 
         # Native window unavailable (e.g. no WebView2 runtime): the engine
         # server is plain HTTP, so any browser can drive the same UI.
         webbrowser.open(url)
         _show_message_box(
-            "3loop",
+            "LOUPe",
             "La fenetre native n'a pas pu s'ouvrir (WebView2 manquant probablement).\n"
-            "3loop a ete lance dans ton navigateur par defaut a la place:\n"
+            "LOUPe a ete lance dans ton navigateur par defaut a la place:\n"
             f"{url}\n\n"
             "Pour la fenetre native, installe le WebView2 Runtime:\n"
-            "https://go.microsoft.com/fwlink/p/?LinkId=2124703",
+            "https://go.microsoft.com/fwlink/?LinkId=2124703",
         )
         while True:
             time.sleep(3600)
     except Exception:
         _write_log(f"main() failed:\n{traceback.format_exc()}")
-        _show_message_box("3loop - erreur au demarrage", traceback.format_exc()[-1200:])
+        _show_message_box("LOUPe - erreur au demarrage", traceback.format_exc()[-1200:])
+    finally:
+        _stop_owned_ollama_server()
 
 
 if __name__ == "__main__":

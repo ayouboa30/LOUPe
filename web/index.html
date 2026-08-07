@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>3loop</title>
+<title>LOUPe beta 0.1</title>
+<link rel="icon" href="assets/pixel_researcher_icon.png" />
 <link rel="stylesheet" href="style.css" />
 <link rel="stylesheet" href="vendor/katex/katex.min.css" />
 </head>
@@ -13,7 +14,8 @@
   <aside class="sidebar">
     <div class="brand">
       <span id="brand-badge" class="brand-badge"></span>
-      <span class="brand-name">3loop</span>
+      <span class="brand-name">LOUPe</span>
+      <span class="beta-badge">beta 0.1</span>
     </div>
 
     <button id="new-chat" class="btn-new-chat">+ Nouvelle conversation</button>
@@ -34,12 +36,65 @@
       <select id="model-select"></select>
     </div>
 
+    <div class="side-section" id="theme-section">
+      <label for="kind-select">Thème</label>
+      <select id="kind-select">
+        <option value="auto">LOUPe · chercheur (auto)</option>
+        <option value="math">MATh · tableau à craie</option>
+        <option value="code">CODy · terminal néon</option>
+        <option value="general">LOUPe · général</option>
+      </select>
+      <p class="hint">Change le personnage, les couleurs et les animations. Le compagnon posé sur le bureau suit aussi ce choix.</p>
+    </div>
+
+    <div class="side-section" id="custom-model-section" hidden>
+      <label for="custom-model">Modèle personnalisé</label>
+      <input id="custom-model" type="text" placeholder="ex. gpt-5.6-luna" autocomplete="off" />
+      <p class="hint">Identifiant transmis à la CLI sélectionnée.</p>
+    </div>
+
     <p id="backend-hint" class="hint"></p>
+
+    <div id="coding-write-section" class="coding-write-section" hidden>
+      <label class="switch-row">
+        <input id="coding-write-toggle" type="checkbox" />
+        <span>Autoriser les écritures PC</span>
+      </label>
+      <input id="coding-workspace" type="text" placeholder="Dossier de travail explicite (chemin Windows)" autocomplete="off" hidden />
+      <p id="coding-write-hint" class="hint warn">Lecture seule par défaut. Active ce mode uniquement après avoir choisi le dossier cible.</p>
+    </div>
 
     <label class="switch-row">
       <input id="research-toggle" type="checkbox" />
-      <span>Recherche web triangulée</span>
+      <span>Recherche web triangulée pendant la réponse</span>
     </label>
+
+    <div id="help-section" class="help-section">
+      <button id="help-now" class="help-now" type="button" aria-label="Ouvrir l’aide instantanée">
+        <span aria-hidden="true">?</span>
+        <strong>Aide instantanée</strong>
+      </button>
+      <div class="eye-tracking-controls">
+        <button id="eye-tracking-start" class="text-button" type="button" disabled>Suivi Python des yeux · bientôt disponible</button>
+        <button id="eye-tracking-stop" class="text-button" type="button" hidden disabled>Arrêter</button>
+      </div>
+      <p id="help-status" class="hint">Aide manuelle disponible. Le suivi Python des yeux sera disponible bientôt.</p>
+    </div>
+
+    <div class="background-research">
+      <div class="background-research-label">Recherche en arrière-plan</div>
+      <div class="research-row">
+        <input id="research-question" type="text" placeholder="Question à rechercher…" />
+        <button id="research-now" class="research-now" type="button" aria-label="Lancer la recherche" title="Lancer la recherche">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" style="display:block;margin:0 auto">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3 12h18" />
+            <path d="M12 3c2.4 2.5 3.8 5.7 3.8 9s-1.4 6.5-3.8 9c-2.4-2.5-3.8-5.7-3.8-9s1.4-6.5 3.8-9Z" />
+          </svg>
+        </button>
+      </div>
+      <p id="research-status" class="research-status">Le petit compagnon peut chercher pendant que tu travailles.</p>
+    </div>
 
     <details class="side-section advanced">
       <summary>Paramètres avancés</summary>
@@ -47,13 +102,6 @@
       <input id="cycles-range" type="range" min="1" max="8" value="2" />
       <label>Longueur max (tokens) <span id="tokens-value">256</span></label>
       <input id="tokens-range" type="range" min="64" max="4096" step="64" value="256" />
-      <label>Type de sortie</label>
-      <select id="kind-select">
-        <option value="auto">Automatique</option>
-        <option value="code">Code</option>
-        <option value="math">Mathématiques</option>
-        <option value="general">Général</option>
-      </select>
     </details>
   </aside>
 
@@ -61,12 +109,17 @@
     <div id="messages" class="messages">
       <div class="empty-state">
         <div id="empty-badge" class="empty-badge"></div>
-        <h1>3loop</h1>
+        <h1>LOUPe</h1>
         <p>Heuristique → Critique → Rédacteur → Vote de consensus.<br/>Pose une question de code, de maths, ou une recherche.</p>
       </div>
     </div>
 
     <form id="composer" class="composer">
+      <label id="thinking-control" class="composer-thinking-control" hidden title="Raisonnement approfondi avec Qwen3 4B">
+        <input id="thinking-toggle" type="checkbox" aria-label="Activer le raisonnement approfondi" />
+        <span class="composer-thinking-switch" aria-hidden="true"></span>
+        <span>Thinking</span>
+      </label>
       <textarea id="prompt-input" rows="1" placeholder="Écris ton message…"></textarea>
       <button id="send-btn" type="submit" aria-label="Envoyer">
         <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M3 11.5 21 3l-7 18-3-7-8-2.5Z"/></svg>
@@ -74,29 +127,104 @@
     </form>
   </main>
 
-  <button id="side-panel-toggle" class="side-panel-toggle" type="button" aria-label="Afficher le panneau" title="Documents et discussions" hidden>
+  <button id="side-panel-toggle" class="side-panel-toggle" type="button" aria-label="Afficher le panneau" title="Conversations et documents" hidden>
     <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
   </button>
 
   <aside class="side-panel" id="side-panel">
-    <button id="side-panel-close" class="side-panel-close" type="button" aria-label="Réduire le panneau" title="Réduire">
-      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
-    </button>
+    <div class="side-panel-actions">
+      <button id="side-panel-expand" class="side-panel-expand" type="button" aria-expanded="false" aria-label="Ouvrir le panneau en grand" title="Ouvrir en grand">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5"/></svg>
+        <span>Ouvrir en grand</span>
+      </button>
+      <button id="side-panel-close" class="side-panel-close" type="button" aria-label="Réduire le panneau" title="Réduire">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
 
-    <div class="panel-card">
-      <h4>Documents</h4>
-      <p class="panel-hint">PDF, texte ou markdown. Coché = inclus dans le prochain message.</p>
-      <label class="btn-upload">
-        + Ajouter un document
-        <input id="document-input" type="file" accept=".pdf,.txt,.md,.markdown,.csv,.log" multiple hidden />
-      </label>
-      <div id="document-list" class="doc-list muted">Aucun document.</div>
+    <div class="panel-card scientific-search-card">
+      <h4>Recherche scientifique ML</h4>
+      <p class="panel-hint">Crossref · OpenAlex · arXiv · Semantic Scholar · artefacts ML.</p>
+      <div class="workspace-search-row">
+        <input id="scientific-search-input" type="text" placeholder="Méthode, dataset, benchmark…" />
+        <button id="scientific-search-button" class="workspace-icon-button" type="button" aria-label="Rechercher">⌕</button>
+      </div>
+      <p id="scientific-search-status" class="panel-hint" role="status" aria-live="polite"></p>
+      <div id="scientific-results" class="scientific-results muted">Aucun résultat.</div>
+    </div>
+
+    <div class="panel-card gmail-card">
+      <h4>Lecture Gmail</h4>
+      <p class="panel-hint">Lecture seule : résumé quotidien des emails reçus pendant les dernières 24 heures, jusqu’à 25 messages, hors Promotions. Expéditeur, résumé et catégorie (publicité, travail ou autre) ; aucun email n’est envoyé ni modifié.</p>
+      <div id="gmail-config-form" class="gmail-config-form" hidden>
+        <p class="panel-hint">Colle les identifiants OAuth de ton application Google. Ils restent sur cet ordinateur.</p>
+        <button id="gmail-oauth-help" class="gmail-oauth-help" type="button">Obtenir mes identifiants OAuth</button>
+        <details class="gmail-oauth-steps">
+          <summary>Comment faire ?</summary>
+          <ol>
+            <li>Crée ou sélectionne un projet Google Cloud.</li>
+            <li>Active <strong>Gmail API</strong> dans la bibliothèque.</li>
+            <li>Configure l’écran de consentement OAuth et ajoute ton adresse comme utilisateur test.</li>
+            <li>Dans <strong>Identifiants</strong>, crée un client OAuth de type <strong>Application de bureau</strong>.</li>
+            <li>Copie le Client ID et le Client secret ici, puis clique sur le bouton d’enregistrement.</li>
+          </ol>
+          <p class="panel-hint">Ne saisis jamais ton mot de passe Gmail dans 3loop : Google te le demandera dans sa propre fenêtre sécurisée.</p>
+        </details>
+        <label for="gmail-client-id">Client ID Google</label>
+        <input id="gmail-client-id" type="text" placeholder="...apps.googleusercontent.com" autocomplete="off" />
+        <label for="gmail-client-secret">Client secret Google</label>
+        <input id="gmail-client-secret" type="password" placeholder="Client secret" autocomplete="new-password" />
+        <button id="gmail-save-config" class="btn-upload workspace-action" type="button">Enregistrer et connecter</button>
+      </div>
+      <div class="gmail-actions">
+        <button id="gmail-connect" class="btn-upload workspace-action" type="button" hidden>Connecter Gmail</button>
+        <button id="gmail-refresh" class="workspace-action" type="button" hidden>Lire les emails des dernières 24 heures</button>
+      </div>
+      <p id="gmail-status" class="panel-hint" role="status" aria-live="polite">Vérification de la connexion…</p>
+      <div id="gmail-list" class="gmail-list muted">Aucun email chargé.</div>
+    </div>
+
+    <div class="panel-card library-card">
+      <h4>Bibliothèque scientifique</h4>
+      <div class="workspace-search-row">
+        <input id="library-search-input" type="text" placeholder="Filtrer les références…" />
+      </div>
+      <div id="scientific-library-list" class="scientific-library-list muted">Chargement…</div>
+      <div class="workspace-actions">
+        <button id="compare-selected-button" class="btn-upload workspace-action" type="button" disabled>Comparer la sélection</button>
+        <select id="library-export-format" class="workspace-export-format" aria-label="Format d’export">
+          <option value="bibtex">BibTeX</option>
+          <option value="ris">RIS</option>
+          <option value="csl-json">CSL-JSON</option>
+        </select>
+        <button id="library-export-button" class="btn-upload workspace-action" type="button">Exporter</button>
+      </div>
+    </div>
+
+    <div class="panel-card notebook-card">
+      <h4>Carnet de recherche</h4>
+      <input id="notebook-note-title" type="text" placeholder="Titre de la note (optionnel)" />
+      <textarea id="notebook-note-body" class="notebook-note-body" rows="3" placeholder="Observation, hypothèse, prochaine vérification…"></textarea>
+      <button id="notebook-save-button" class="btn-upload workspace-action" type="button">Ajouter au carnet</button>
+      <div id="notebook-list" class="notebook-list muted">Aucune note.</div>
     </div>
 
     <div class="panel-card">
-      <h4>Discussions</h4>
-      <button id="save-discussion" class="btn-upload" type="button">+ Sauvegarder la discussion actuelle</button>
-      <div id="discussion-list" class="doc-list muted">Aucune discussion sauvegardée.</div>
+      <h4>Cahier de conversations</h4>
+      <p class="panel-hint">Un clic recharge la conversation, puis le modèle sélectionné compacte son contexte.</p>
+      <button id="save-discussion" class="btn-upload" type="button">+ Sauvegarder la conversation actuelle</button>
+      <div id="discussion-list" class="conversation-list muted">Aucune conversation sauvegardée.</div>
+      <p id="compact-status" class="panel-hint" role="status" aria-live="polite"></p>
+    </div>
+
+    <div class="panel-card">
+      <h4>Documents</h4>
+      <p class="panel-hint">PDF, texte ou markdown. Coché = inclus dans le prochain message et analysé localement, même hors connexion.</p>
+      <label class="btn-upload">
+        + Ajouter un document
+        <input id="document-input" type="file" accept=".pdf,.txt,.md,.markdown,.csv,.log,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden />
+      </label>
+      <div id="document-list" class="doc-list muted">Aucun document.</div>
     </div>
   </aside>
 

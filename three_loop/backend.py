@@ -417,12 +417,16 @@ class OllamaBackend(SharedLLMBackend):
         host: str = "http://localhost:11434",
         timeout: float = 120.0,
         keep_alive: str = "30m",
+        thinking: bool | None = None,
     ) -> None:
         super().__init__(serialize_requests=False)
         self.model = model
         self.host = host.rstrip("/")
         self.timeout = timeout
         self.keep_alive = keep_alive
+        # ``None`` preserves Ollama's model default. A bool is sent at the
+        # top-level API field, which is where Ollama reads this capability.
+        self.thinking = thinking
         self._num_thread = os.cpu_count() or 4
 
     async def _complete(
@@ -455,12 +459,14 @@ class OllamaBackend(SharedLLMBackend):
         }
         if max_tokens is not None:
             payload["options"]["num_predict"] = max_tokens
+        if self.thinking is not None:
+            payload["think"] = self.thinking
         action = _marker_value(prompt, "3LOOP_ACTION") or _marker_value(
             system_prompt or "", "3LOOP_ACTION"
         )
-        if action in {"vote", "latent_debate"}:
-            # Force valid, minimal JSON instead of letting a small model
-            # ramble in prose before (or instead of) the JSON payload.
+        if action in {"vote", "latent_debate", "gmail_batch"}:
+            # Force valid, minimal JSON instead of letting a small model ramble
+            # in prose before (or instead of) the JSON payload.
             if action == "vote":
                 payload["format"] = {
                     "type": "object",
@@ -470,6 +476,19 @@ class OllamaBackend(SharedLLMBackend):
                         "rationale": {"type": "string"},
                     },
                     "required": ["resolved", "confidence", "rationale"],
+                }
+            elif action == "gmail_batch":
+                payload["format"] = {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": {"type": "integer"},
+                            "summary": {"type": "string"},
+                            "category": {"type": "string", "enum": ["publicité", "travail", "autre"]},
+                        },
+                        "required": ["index", "summary", "category"],
+                    },
                 }
             else:
                 payload["format"] = "json"

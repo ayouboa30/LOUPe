@@ -12,13 +12,23 @@ Both measured directly on this machine (not assumed from docs alone):
     -> NDJSON: {"type":"item.completed","item":{"type":"agent_message","text":"391"}}
     (verified end to end: stdin read correctly, read-only sandbox blocks
     writes, correct answer returned.)
+
+Neither backend takes an API key, and neither ever should: the user has
+already installed and authenticated these CLIs for their own terminal work,
+so 3loop bridges that existing session instead of asking for a second
+credential it would then have to store. What replaces the key is detection -
+``find()`` plus the install hints below - so "not installed" is answered with
+the exact command to fix it rather than with a failed call.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+from collections.abc import Sequence
 
-from .cli_agent_backend import CLIAgentBackend, find_executable
+from .cli_agent_backend import CLIAgentBackend, _CREATE_NO_WINDOW, find_executable
 
 #: "sonnet" is Claude Code's own rolling alias for its latest Sonnet model
 #: (confirmed in ``claude --help``: "--model ... Provide an alias for the
@@ -31,6 +41,77 @@ CLAUDE_CODE_DEFAULT_MODEL = "sonnet"
 #: default) - hardcoding one here would override a choice the user already
 #: made outside 3loop for no reason.
 CODEX_DEFAULT_MODEL = ""
+
+#: Shown by the UI when the CLI is missing, and used as the error raised when
+#: the user picks that backend anyway. Both say the same two things on
+#: purpose: the exact install command, and that 3loop asks for no API key -
+#: the account/subscription already attached to the user's own CLI session is
+#: what pays for the call. Anthropic now deprecates the npm install in favour
+#: of the native installer, so the Windows one-liner is quoted rather than
+#: ``npm i -g @anthropic-ai/claude-code``.
+CLAUDE_CODE_INSTALL_HINT = (
+    "Claude Code est introuvable. Installe la CLI (Windows PowerShell : "
+    "irm https://claude.ai/install.ps1 | iex), puis lance `claude` une fois "
+    "pour te connecter. 3loop se branche sur ta CLI locale et ne demande "
+    "aucune cle API."
+)
+
+#: The scope matters: ``npm i -g codex`` installs an unrelated 2012 package.
+CODEX_INSTALL_HINT = (
+    "Codex est introuvable. Installe la CLI (npm i -g @openai/codex), puis "
+    "lance `codex login` pour te connecter. 3loop se branche sur ta CLI "
+    "locale et ne demande aucune cle API."
+)
+
+#: A version probe is pure decoration for the UI, and it runs on the
+#: ``/api/config`` path that every page load blocks on. Three seconds is
+#: already generous for a CLI printing one line; a shim that hangs longer
+#: than that must cost the user a missing version string, not a frozen app.
+CLI_VERSION_TIMEOUT = 3.0
+
+
+def cli_version(
+    executable: str | None,
+    *,
+    args: Sequence[str] = ("--version",),
+    timeout: float = CLI_VERSION_TIMEOUT,
+) -> str:
+    """Return a CLI's reported version, or ``""`` if it cannot be determined.
+
+    Never raises and never blocks for long: a missing binary, a non-zero
+    exit, a CLI that ignores ``--version``, a hung npm shim and a timeout all
+    map to the same empty string. Callers treat "unknown version" as normal,
+    because it is - some of these CLIs print their version to stderr, some
+    prefix it with a product name, and an offline/logged-out CLI may refuse
+    the call entirely while still being perfectly usable afterwards.
+
+    Both streams are inspected (stderr second) and only the first non-empty
+    line is kept, trimmed: the point is a short label next to a dropdown, not
+    a full banner.
+    """
+
+    if not executable:
+        return ""
+    try:
+        completed = subprocess.run(
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            # Same reason as every other call in this package: without it a
+            # black console flashes over whatever the user is doing.
+            creationflags=_CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+    for stream in (completed.stdout, completed.stderr):
+        for line in (stream or "").splitlines():
+            cleaned = line.strip()
+            if cleaned:
+                return cleaned[:120]
+    return ""
 
 
 class ClaudeCodeBackend(CLIAgentBackend):
@@ -45,16 +126,24 @@ class ClaudeCodeBackend(CLIAgentBackend):
     def find(cls) -> str | None:
         return find_executable("claude")
 
-    def build_argv(self) -> list[str]:
+    @classmethod
+    def not_found_message(cls) -> str:
+        # The install hint *is* the not-found message: one wording for the
+        # UI hint, the /api/config payload and the raised error, so the user
+        # never gets a vaguer version of the same problem depending on where
+        # it surfaces.
+        return CLAUDE_CODE_INSTALL_HINT
+
+    def build_argv(self, workspace=None) -> list[str]:
         return [
             "-p",
             "--output-format",
             "json",
-            # "plan" is Claude Code's own read-only mode: it can inspect but
-            # not edit or run commands. Paired with the isolated workspace
-            # (belt and suspenders, not a substitute for it).
+            # Plan mode is read-only. In write mode use Claude's normal
+            # permission flow so the host can surface any approval request
+            # instead of silently accepting edits.
             "--permission-mode",
-            "plan",
+            "default" if self.allow_writes else "plan",
             "--model",
             self.model,
         ]
@@ -88,14 +177,18 @@ class CodexBackend(CLIAgentBackend):
     def find(cls) -> str | None:
         return find_executable("codex")
 
-    def build_argv(self) -> list[str]:
+    @classmethod
+    def not_found_message(cls) -> str:
+        return CODEX_INSTALL_HINT
+
+    def build_argv(self, workspace=None) -> list[str]:
         argv = [
             "exec",
             "--json",
-            # Blocks every write, including inside the isolated workspace -
-            # this backend never needs to touch a filesystem at all.
+            # Read-only is the default. Workspace-write is only selected
+            # after the user explicitly supplies a directory in the UI.
             "--sandbox",
-            "read-only",
+            "workspace-write" if self.allow_writes else "read-only",
         ]
         if self.model:
             argv += ["--model", self.model]

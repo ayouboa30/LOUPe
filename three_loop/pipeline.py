@@ -33,6 +33,18 @@ from .web import SearchProvider, triangulate_sources
 
 
 RewardFunction = Callable[[CycleResult], float | Awaitable[float]]
+CancellationProbe = Callable[[], bool]
+
+
+def _raise_if_cancelled(cancel_requested: CancellationProbe | None) -> None:
+    """Abort at cooperative boundaries without interrupting an active LLM call."""
+
+    if cancel_requested is not None and cancel_requested():
+        raise PipelineCancelled("Exécution arrêtée à la demande de l’utilisateur.")
+
+
+class PipelineCancelled(Exception):
+    """Raised when the local UI has requested a running pipeline to stop."""
 
 
 @dataclass
@@ -140,11 +152,19 @@ class ThreeLoopPipeline:
         *,
         kind: TaskKind | str | None = None,
         research: bool | None = None,
+        conversation_context: str | None = None,
+        cancel_requested: CancellationProbe | None = None,
     ) -> RunResult:
         """Execute a run and return its terminal result."""
 
         result: RunResult | None = None
-        async for event in self.stream(task, kind=kind, research=research):
+        async for event in self.stream(
+            task,
+            kind=kind,
+            research=research,
+            conversation_context=conversation_context,
+            cancel_requested=cancel_requested,
+        ):
             if event.result is not None:
                 result = event.result
         if result is None:  # defensive guard for future event implementations
@@ -157,15 +177,26 @@ class ThreeLoopPipeline:
         *,
         kind: TaskKind | str | None = None,
         research: bool | None = None,
+        conversation_context: str | None = None,
+        cancel_requested: CancellationProbe | None = None,
     ) -> AsyncIterator[PipelineEvent]:
-        """Yield live execution events while the debate is running."""
+        """Yield live execution events while the debate is running.
 
+        Cancellation is cooperative: an in-flight model request is allowed to
+        finish cleanly, then no subsequent agent, vote, or cycle is started.
+        This avoids terminating the shared local Ollama process.
+        """
+
+        _raise_if_cancelled(cancel_requested)
         async with self._lock_for_current_loop():
             async for event in self._stream_unlocked(
                 task,
                 kind=kind,
                 research=research,
+                conversation_context=conversation_context,
+                cancel_requested=cancel_requested,
             ):
+                _raise_if_cancelled(cancel_requested)
                 yield event
 
     def _lock_for_current_loop(self) -> asyncio.Lock:
@@ -184,7 +215,10 @@ class ThreeLoopPipeline:
         *,
         kind: TaskKind | str | None,
         research: bool | None,
+        conversation_context: str | None,
+        cancel_requested: CancellationProbe | None,
     ) -> AsyncIterator[PipelineEvent]:
+        _raise_if_cancelled(cancel_requested)
         if not task.strip():
             raise ValueError("task must not be empty")
         resolved_kind = _normalize_kind(kind, task)
@@ -192,6 +226,8 @@ class ThreeLoopPipeline:
             self.config.research_enabled if research is None else research
         )
         history = ConversationHistory()
+        if conversation_context:
+            history.add_conversation(conversation_context)
         cycles: list[CycleResult] = []
         start_history = len(self.optimizer.history)
         last_solution = ""
@@ -208,6 +244,7 @@ class ThreeLoopPipeline:
             )
 
             for cycle in range(1, self.config.max_cycles + 1):
+                _raise_if_cancelled(cancel_requested)
                 temperatures = {
                     role: self.optimizer.sample_temperature(role)
                     for role in AGENT_ROLES
@@ -222,6 +259,7 @@ class ThreeLoopPipeline:
                 research_result = WebResearchResult()
                 research_digest = ""
                 if use_research:
+                    _raise_if_cancelled(cancel_requested)
                     queries = await self._generate_independent_queries(
                         task,
                         kind=resolved_kind,
@@ -248,6 +286,7 @@ class ThreeLoopPipeline:
                             },
                         )
                     else:
+                        _raise_if_cancelled(cancel_requested)
                         research_result = await triangulate_sources(
                             queries,
                             self.search_provider,
@@ -267,6 +306,7 @@ class ThreeLoopPipeline:
                     # 14.3 ms per prompt token that alone would outweigh the
                     # whole debate, so only a digest ever reaches the prompt.
                     if self.config.research_digest_enabled and research_result.sources:
+                        _raise_if_cancelled(cancel_requested)
                         research_digest = await self._research_agent.digest(
                             research_result.sources,
                             task=task,
@@ -286,6 +326,7 @@ class ThreeLoopPipeline:
                     max_chars=self.config.history_max_chars,
                 )
                 if self.config.compact_debate:
+                    _raise_if_cancelled(cancel_requested)
                     compact = await self._latent_coordinator.run(
                         task,
                         kind=resolved_kind,
@@ -300,6 +341,7 @@ class ThreeLoopPipeline:
                     writer = compact.final_solution
                     votes = compact.votes
                 else:
+                    _raise_if_cancelled(cancel_requested)
                     heuristic = await self.agents[AgentRole.HEURISTIC].produce(
                         task,
                         kind=resolved_kind,
@@ -313,6 +355,7 @@ class ThreeLoopPipeline:
                     # role only needs the gist of what the previous one
                     # produced, and stripping vowels/punctuation cuts the
                     # prefill cost of that carried-over context on CPU.
+                    _raise_if_cancelled(cancel_requested)
                     critique = await self.agents[AgentRole.CRITIC].produce(
                         task,
                         compact_text(heuristic),
@@ -322,6 +365,7 @@ class ThreeLoopPipeline:
                         sources=research_result.sources,
                         temperature=temperatures[AgentRole.CRITIC],
                     )
+                    _raise_if_cancelled(cancel_requested)
                     writer = await self.agents[AgentRole.WRITER].produce(
                         task,
                         compact_text(heuristic),
@@ -332,6 +376,7 @@ class ThreeLoopPipeline:
                         sources=research_result.sources,
                         temperature=temperatures[AgentRole.WRITER],
                     )
+                    _raise_if_cancelled(cancel_requested)
                     votes = tuple(
                         await asyncio.gather(
                             *(
@@ -358,6 +403,7 @@ class ThreeLoopPipeline:
                 # full each time. ``last_solution`` keeps the verbatim answer:
                 # the user sees the full text, only the model sees the digest.
                 if self.config.context_agent_enabled:
+                    _raise_if_cancelled(cancel_requested)
                     distilled = await self._context_agent.distill(
                         writer,
                         task=task,
@@ -421,6 +467,7 @@ class ThreeLoopPipeline:
                         data={"vote": vote, "consensus": consensus},
                     )
 
+                _raise_if_cancelled(cancel_requested)
                 validation_score = await validate_solution(
                     writer,
                     resolved_kind,
@@ -437,6 +484,7 @@ class ThreeLoopPipeline:
                     sources=research_result.sources,
                     validation_score=validation_score,
                 )
+                _raise_if_cancelled(cancel_requested)
                 reward = await self._calculate_reward(provisional)
                 cycle_result = replace(provisional, reward=reward)
                 cycles.append(cycle_result)
@@ -498,6 +546,8 @@ class ThreeLoopPipeline:
                 cycle=self.config.max_cycles,
                 result=result,
             )
+        except PipelineCancelled:
+            raise
         except Exception as exc:
             yield PipelineEvent(
                 EventType.ERROR,
@@ -505,6 +555,45 @@ class ThreeLoopPipeline:
                 data={"exception": repr(exc)},
             )
             raise
+
+    async def research_only(
+        self,
+        task: str,
+        *,
+        kind: TaskKind | str | None = None,
+        max_results: int | None = None,
+        min_agents: int | None = None,
+    ) -> WebResearchResult:
+        """Run the three independent researcher queries without a debate.
+
+        This powers the floating mascot's background-search action: the web
+        work can finish while the user continues working, without starting a
+        full answer-generation run in the main conversation.
+        """
+
+        if not task.strip():
+            raise ValueError("research task must not be empty")
+        resolved_kind = _normalize_kind(kind, task)
+        temperatures = {
+            role: self.optimizer.sample_temperature(role) for role in AGENT_ROLES
+        }
+        queries = await self._generate_independent_queries(
+            task,
+            kind=resolved_kind,
+            cycle=1,
+            temperatures=temperatures,
+        )
+        if self.search_provider is None:
+            return WebResearchResult(
+                queries=queries,
+                errors={"provider": "Aucun SearchProvider configure."},
+            )
+        return await triangulate_sources(
+            queries,
+            self.search_provider,
+            max_results=max_results or self.config.max_search_results,
+            min_agents=min_agents or self.config.min_source_agents,
+        )
 
     async def _generate_independent_queries(
         self,

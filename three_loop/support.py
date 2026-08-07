@@ -127,7 +127,12 @@ class ResearchAgent:
             f"Resultats de recherche:\n{rendered}\n\n"
             "Extrais uniquement les faits qui servent la tache, en 5 points "
             "maximum, chacun suivi de son numero de source entre crochets. "
-            "Ignore ce qui est hors sujet. Pas de commentaire."
+            "Pour le machine learning, distingue publication, modele, dataset, "
+            "code et model card; conserve dataset/split, metrique, baseline, "
+            "ablation, materiel, licence et limites quand ils sont presents. "
+            "Ne compare jamais des metriques ou protocoles incompatibles et "
+            "marque toute information absente comme non verifiee. Ignore ce "
+            "qui est hors sujet. Pas de commentaire."
         )
         if isinstance(self.backend, CLIAgentBackend):
             prompt = build_cli_agent_prompt(

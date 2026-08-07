@@ -37,6 +37,17 @@ from .cli_agent_backend import (
 
 DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 
+#: Single wording for the "not installed" case, reused by ``/api/config`` as
+#: the UI hint and by ``not_found_message`` as the raised error - see the
+#: matching constants in ``coding_cli_backends``. It states plainly that no
+#: API key is involved: OpenCode is authenticated once in the user's own
+#: terminal (``opencode auth login``) and 3loop only bridges that session.
+OPENCODE_INSTALL_HINT = (
+    "OpenCode est introuvable. Installe la CLI (npm i -g opencode-ai), puis "
+    "lance `opencode auth login` pour te connecter. 3loop se branche sur ta "
+    "CLI locale et ne demande aucune cle API."
+)
+
 #: 3loop forwards arbitrary user questions verbatim, so the agent it hands
 #: them to matters - but ``opencode run --agent`` only accepts *primary*
 #: agents (``opencode agent list``: build, compaction, plan, summary,
@@ -128,6 +139,60 @@ def _extract_text(stdout: str) -> str:
     return "".join(chunks).strip()
 
 
+def _error_text(value: object) -> str:
+    """Extract a useful message from OpenCode's varying error payloads."""
+
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("message", "reason", "detail", "description"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        for key in ("error", "cause", "data", "part"):
+            candidate = _error_text(value.get(key))
+            if candidate:
+                return candidate
+        for key in ("name", "code"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return ""
+    if isinstance(value, list):
+        for item in value:
+            candidate = _error_text(item)
+            if candidate:
+                return candidate
+    return ""
+
+
+def _extract_error(*streams: str) -> str:
+    """Read a structured ``type=error`` event without hiding its cause."""
+
+    for stream in streams:
+        for line in stream.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "error":
+                continue
+            message = _error_text(event.get("error"))
+            if not message:
+                message = _error_text(event.get("message"))
+            if not message:
+                message = _error_text(event)
+            if message:
+                return message
+    return ""
+
+
 class OpenCodeBackend(CLIAgentBackend):
     """Run one completion per call through ``opencode run``."""
 
@@ -140,9 +205,10 @@ class OpenCodeBackend(CLIAgentBackend):
         timeout: float = 300.0,
         executable: str | None = None,
         agent: str = DEFAULT_AGENT,
+        **kwargs: object,
     ) -> None:
         self.agent = agent
-        super().__init__(model, timeout=timeout, executable=executable)
+        super().__init__(model, timeout=timeout, executable=executable, **kwargs)
 
     @classmethod
     def find(cls) -> str | None:
@@ -150,12 +216,9 @@ class OpenCodeBackend(CLIAgentBackend):
 
     @classmethod
     def not_found_message(cls) -> str:
-        return (
-            "OpenCode est introuvable. Installe-le (npm i -g opencode-ai) "
-            "ou verifie qu'il est dans le PATH."
-        )
+        return OPENCODE_INSTALL_HINT
 
-    def build_argv(self) -> list[str]:
+    def build_argv(self, workspace=None) -> list[str]:
         return [
             "run",
             "--format",
@@ -163,11 +226,16 @@ class OpenCodeBackend(CLIAgentBackend):
             "--agent",
             self.agent,
             "--dir",
-            str(_workspace()),
+            str(workspace or _workspace()),
             "-m",
             self.model,
         ]
 
     def parse_output(self, stdout: str, stderr: str) -> str:
-        del stderr
-        return _extract_text(stdout)
+        text = _extract_text(stdout)
+        if text:
+            return text
+        error = _extract_error(stdout, stderr)
+        if error:
+            raise RuntimeError(f"OpenCode a signalé une erreur : {error[:500]}")
+        return ""

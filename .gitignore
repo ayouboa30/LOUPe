@@ -3,6 +3,7 @@
 # It is fully reproducible from build_exe.ps1 and must never be committed.
 build/
 dist/
+release/
 *.spec
 *.manifest
 
@@ -33,6 +34,9 @@ models/
 *.key
 *.pem
 api_keys.json
+gmail_token.json
+gmail_client.json
+token.json
 last_run_config.json
 
 # Runtime output --------------------------------------------------------

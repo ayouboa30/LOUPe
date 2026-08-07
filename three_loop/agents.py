@@ -12,6 +12,42 @@ from .models import AgentRole, SourceMatch, TaskKind, Vote
 from .skills import load_skill
 
 
+_ML_MARKERS = (
+    "machine learning", "deep learning", "neural", "transformer", "llm", "vision",
+    "dataset", "benchmark", "fine-tun", "embedding", "reinforcement learning",
+    "classification", "regression", "segmentation", "pytorch", "tensorflow",
+    "apprentissage automatique", "apprentissage profond", "modèle", "modele",
+)
+
+
+def _research_profile(task: str, role: AgentRole) -> str:
+    """Return a bounded search angle for scientific/ML discovery."""
+
+    is_ml = any(marker in task.lower() for marker in _ML_MARKERS)
+    if not is_ml:
+        return (
+            "Scientific-general profile: prefer primary papers, official documentation, "
+            "stable identifiers, dates, and directly verifiable evidence."
+        )
+    angle = {
+        AgentRole.HEURISTIC: (
+            "find primary papers describing the method, architecture and task"
+        ),
+        AgentRole.CRITIC: (
+            "find benchmarks, datasets, baselines, ablations, limitations and negative results"
+        ),
+        AgentRole.WRITER: (
+            "find reproducibility artifacts: code, model cards, licenses, hardware and cost"
+        ),
+    }.get(role, "find primary machine-learning evidence")
+    return (
+        "Machine-learning research profile: " + angle + ". Prefer arXiv/OpenReview for "
+        "papers, Papers with Code for benchmarks/code, and Hugging Face for datasets/model "
+        "cards. Include the exact task, dataset, metric or architecture in the query; do not "
+        "merge incomparable metrics or treat a repository/blog as peer-reviewed evidence."
+    )
+
+
 class RoleAgent(ABC):
     """Base identity backed by the same shared LLM instance."""
 
@@ -40,6 +76,7 @@ class RoleAgent(ABC):
     ) -> str:
         """Generate one independent, concise search query."""
 
+        profile = _research_profile(task, self.role)
         prompt = f"""TASK:
 {task}
 
@@ -48,9 +85,13 @@ class RoleAgent(ABC):
 3LOOP_CYCLE={cycle}
 3LOOP_KIND={kind.value}
 
+RESEARCH PROFILE:
+{profile}
+
 Generate exactly one web search query. Do not mention other agents and do not
 use the previous debate. Prefer precise technical terms, standards, papers,
-or official documentation relevant to the task."""
+official documentation, stable identifiers, datasets, benchmarks or model
+cards relevant to the task. Return only the query, never an explanation."""
         raw = await self.backend.complete(
             prompt,
             temperature=temperature,

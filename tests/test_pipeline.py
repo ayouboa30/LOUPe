@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from three_loop import (
     AgentRole,
     DemoBackend,
@@ -286,3 +288,36 @@ def test_plain_prose_is_left_untouched() -> None:
     raw = "Juste du texte normal."
 
     assert parse_latent_debate(raw, task="t").final_solution == raw
+
+
+def test_compact_debate_rejects_protocol_only_text_instead_of_inventing_an_answer() -> None:
+    """An invalid compact response must never echo the user's task as a fake answer."""
+
+    from three_loop.latent import parse_latent_debate
+
+    with pytest.raises(ValueError, match="aucune solution exploitable"):
+        parse_latent_debate('{"heuristic": "", "critique": ""}', task="Fais la démonstration de Pythagore")
+
+
+def test_stream_cancellation_stops_before_a_completion_event() -> None:
+    """A pending cancellation must prevent both model work and RUN_COMPLETED."""
+
+    from three_loop.pipeline import PipelineCancelled
+
+    backend = DemoBackend()
+    pipeline = ThreeLoopPipeline(backend, config=PipelineConfig(max_cycles=1))
+
+    async def collect() -> list:
+        events = []
+        with pytest.raises(PipelineCancelled):
+            async for event in pipeline.stream(
+                "Démontre le théorème de Pythagore",
+                cancel_requested=lambda: True,
+            ):
+                events.append(event)
+        return events
+
+    events = asyncio.run(collect())
+
+    assert backend.calls == 0
+    assert all(event.event_type is not EventType.RUN_COMPLETED for event in events)

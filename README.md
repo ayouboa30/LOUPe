@@ -1,7 +1,11 @@
-# 3loop
+# LOUPe beta 0.1
 
-Framework Python asynchrone de débat multi-agents. Licence MIT. Chaque cycle
-exécute trois identités sur un backend LLM partagé :
+Application de bureau expérimentale de débat multi-agents. Cette version est une
+**bêta publique** : elle peut contenir des bugs, ralentissements ou changements
+incompatibles dans les prochaines versions. Aucun mot de passe Gmail n’est
+requis ni inclus dans le programme.
+
+Le moteur Python asynchrone de LOUPe fait débattre plusieurs rôles spécialisés :
 
 1. **Heuristique** — propose une esquisse, une preuve ou un algorithme.
 2. **Critique** — cherche les hypothèses cachées, les erreurs, les cas limites.
@@ -13,6 +17,15 @@ boucle ; sinon l'historique est réinjecté dans le cycle suivant.
 Deux rôles de support ne votent pas : **Contexte** distille ce qui est
 transmis d'un cycle à l'autre, **Chercheur** résume les résultats web avant
 qu'ils n'atteignent le débat.
+
+## Les trois compagnons
+
+La bêta garde trois identités visuelles : le chercheur général **LOUPe**, le
+compagnon mathématique **MATh** et le compagnon code **CODy**.
+
+| LOUPe — chercheur | MATh — maths | CODy — code |
+|---|---|---|
+| ![LOUPe chercheur](web/assets/pixel_researcher_strip.png) | ![MATh](web/assets/pixel_pixelbit_strip.png) | ![CODy](web/assets/pixel_cody_strip.png) |
 
 ## Portabilité
 
@@ -32,6 +45,22 @@ ailleurs (import protégé, aucun crash) :
 Sur Linux/macOS, l'app démarre, sert l'interface complète, et tous les
 backends (local, iGPU, OpenCode, cloud) fonctionnent ; seuls le personnage
 flottant et le micro/OCR manquent tant qu'ils ne sont pas portés.
+
+## Installation Windows (LOUPe beta 0.1)
+
+Télécharge `Setup_LOUPe_beta_0.1.exe` depuis le site et lance-le. L’installateur
+copie l’application et ses bibliothèques incluses, installe WebView2, Node.js LTS
+et npm, puis prépare automatiquement les CLI **Codex**, **Claude Code** et
+**OpenCode**. Il installe aussi Ollama si nécessaire et télécharge
+`qwen3:1.7b-flash`. Une connexion Internet est nécessaire pendant cette
+préparation et le modèle peut peser plusieurs centaines de Mo. Les CLI peuvent
+ensuite demander leur propre connexion dans la fenêtre ou le terminal de
+l’utilisateur : aucune clé API ni aucun compte personnel n’est inclus.
+
+Les identifiants Gmail ne sont jamais inclus dans l’installateur. Chaque personne
+configure son propre OAuth Google dans LOUPe, avec le scope strictement limité à
+`gmail.readonly`. Le suivi Python des yeux est annoncé dans l’interface comme
+**bientôt disponible** et reste désactivé dans cette bêta.
 
 ## Application de bureau (Windows)
 
@@ -79,7 +108,36 @@ Extras : `desktop` (app Windows), `web` (recherche DDG), `llama`
 python -m three_loop "Implementer une recherche binaire en Python" --cycles 4
 ```
 
-## API
+## Lecture Gmail (lecture seule)
+
+L’interface contient un panneau **Lecture Gmail**. Il utilise uniquement le
+scope OAuth `gmail.readonly` : LOUPe lit les emails des dernières 24 heures,
+hors spam et Promotions, puis affiche l’expéditeur, un résumé en français et
+une classification (`publicité`, `travail` ou `autre`). Aucun email n’est
+envoyé, supprimé ou modifié.
+
+Pour activer la connexion :
+
+1. Dans le panneau **Lecture Gmail**, clique sur **Obtenir mes identifiants
+   OAuth**. Cela ouvre Google Cloud Console dans le navigateur.
+2. Crée ou sélectionne un projet, puis va dans **API et services → Bibliothèque**
+   et active **Gmail API**.
+3. Configure l’**écran de consentement OAuth**. Pour un usage personnel,
+   ajoute ton adresse Gmail comme utilisateur test si Google le demande.
+4. Va dans **API et services → Identifiants → Créer des identifiants → ID client
+   OAuth**, choisis **Application de bureau**, puis crée le client.
+5. Copie le **Client ID** et le **Client secret** dans 3loop et clique sur
+   **Enregistrer et connecter**. Google ouvrira alors sa propre page de
+   connexion pour ton adresse Gmail.
+
+3loop ne demande jamais ton mot de passe Gmail. Les identifiants OAuth sont
+envoyés uniquement au serveur local et conservés dans
+`~/.3loop/gmail_client.json`. Le token est conservé localement dans
+`~/.3loop/gmail_token.json` ; aucun de ces secrets ne passe par le frontend.
+Sans modèle disponible ou sans clé cloud configurée, la lecture reste possible
+avec un résumé et une classification heuristiques.
+
+## Exemple Python
 
 ```python
 import asyncio
@@ -159,3 +217,19 @@ web/                   # interface (HTML/CSS/JS, KaTeX embarqué)
 skills/                # règles de formatage par domaine
 tests/
 ```
+
+## Licence, contributions et usage commercial
+
+LOUPe est un projet **source disponible** : les contributions, corrections,
+forks et retours sont bienvenus. La bêta est publiée sous la
+[LOUPe Non-Commercial Source License 1.0](LICENSE).
+
+Cette licence autorise l’utilisation, l’étude, la modification et le partage
+à des fins personnelles, éducatives, de recherche ou communautaires non
+commerciales. La vente, la revente, l’intégration dans un produit ou service
+payant, le SaaS payant et toute exploitation à avantage commercial sont
+interdits sans autorisation écrite des ayants droit.
+
+Cette licence personnalisée n’est pas une licence open source approuvée par
+l’OSI ; le code reste public et ouvert aux contributions, mais la restriction
+non commerciale est explicite.

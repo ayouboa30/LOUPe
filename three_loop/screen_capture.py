@@ -69,6 +69,34 @@ gdi32.DeleteObject.argtypes = [HANDLE]
 
 NULL_BRUSH = 5  # GetStockObject stock object id
 
+WM_QUIT = 0x0012
+PM_REMOVE = 0x0001
+
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT,
+]
+
+
+def _drain_quit_messages() -> int:
+    """Remove any pending WM_QUIT from the current thread's message queue.
+
+    Returns how many were discarded, which is what makes the behaviour
+    testable without a real capture.
+
+    A WM_QUIT is thread-wide, not window-wide: it survives the window that
+    caused it and is delivered to whichever message loop runs next on that
+    thread. Since this module's overlay and the companion's question card are
+    two successive modal loops on the *same* worker thread, one stray quit
+    silently aborts the second one.
+    """
+
+    msg = wintypes.MSG()
+    discarded = 0
+    while user32.PeekMessageW(ctypes.byref(msg), None, WM_QUIT, WM_QUIT, PM_REMOVE):
+        discarded += 1
+    return discarded
+
 
 class _WNDCLASS(ctypes.Structure):
     _fields_ = [
@@ -138,6 +166,13 @@ class _RegionSelector:
 
         user32.DestroyWindow(hwnd)
         gdi32.DeleteObject(self._pen)
+        # Belt and braces: leave the calling thread's queue clean whatever
+        # happened above. This selector is opened from a worker thread that
+        # goes on to run another modal loop (the question card), and a single
+        # leftover WM_QUIT is enough to make that loop exit before showing
+        # anything. Draining is safe because this thread owns no other window
+        # by now - the overlay was the only one and it is already destroyed.
+        _drain_quit_messages()
         if self._result is None:
             return None
         # Translate back to virtual-screen (multi-monitor) coordinates.
@@ -195,7 +230,15 @@ class _RegionSelector:
             user32.PostQuitMessage(0)
             return 0
         if msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
+            # Deliberately NOT PostQuitMessage here. ``run`` only calls
+            # DestroyWindow *after* its own message loop has already ended, so
+            # a quit posted from this branch lands in the thread's queue with
+            # nobody left to consume it. That stray WM_QUIT then killed the
+            # very next modal loop opened on the same thread: after a capture,
+            # the OCR worker calls ``prompt_window.ask_question``, whose
+            # GetMessageW returned 0 immediately, so the question card never
+            # appeared and the flow silently behaved as if the user had
+            # cancelled - "I take the screenshot and nothing happens".
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 

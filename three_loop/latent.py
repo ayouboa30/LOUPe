@@ -95,7 +95,7 @@ class LatentDebateCoordinator:
                 prompt, temperature=temperature, system_prompt=None,
                 max_tokens=self.max_tokens,
             )
-            return parse_latent_debate(raw, task=task)
+            return await self._parse_or_retry(raw, task=task, temperature=temperature)
 
         # The shared prefix is built by ``prompting.build_prefix`` so that the
         # debate, the context agent and the research agent all present
@@ -155,7 +155,50 @@ class LatentDebateCoordinator:
             ),
             max_tokens=self.max_tokens,
         )
-        return parse_latent_debate(raw, task=task)
+        return await self._parse_or_retry(raw, task=task, temperature=temperature)
+
+    async def _parse_or_retry(
+        self,
+        raw: str,
+        *,
+        task: str,
+        temperature: float,
+    ) -> LatentDebateResult:
+        """Parse a compact turn, then retry once with a direct-answer prompt.
+
+        A malformed protocol response must not become a fake answer, nor make
+        the whole run fail when the model can still answer normally. The
+        retry is deliberately limited to the no-answer case and requests
+        ordinary prose, so it cannot reproduce the same JSON-only failure.
+        """
+
+        try:
+            return parse_latent_debate(raw, task=task)
+        except ValueError:
+            retry_prompt = (
+                "Le précédent essai a produit une réponse structurée vide ou invalide. "
+                "Réponds à nouveau à la demande ci-dessous. Fournis uniquement la "
+                "réponse finale destinée à l’utilisateur : pas de JSON, pas de rôles, "
+                "pas de votes et pas de commentaire sur ce protocole.\n\n"
+                f"DEMANDE :\n{task}"
+            )
+            retry = await self.backend.complete(
+                retry_prompt,
+                temperature=temperature,
+                system_prompt=(
+                    "You are the 3loop final-answer engine. Return a useful, "
+                    "direct answer to the user's task."
+                ),
+                max_tokens=self.max_tokens,
+            )
+            try:
+                return _fallback_from_prose(retry, task=task)
+            except ValueError as retry_error:
+                raise ValueError(
+                    "Le modèle n’a fourni aucune réponse exploitable après une relance "
+                    "automatique en mode détaillé. Réessaie avec un autre modèle local "
+                    "ou désactive le mode Thinking."
+                ) from retry_error
 
     @staticmethod
     def _build_cli_agent_prompt(
@@ -407,11 +450,15 @@ def _fallback_from_prose(
     if solution is None:
         stripped = re.sub(r'^\s*\{?\s*"?heuristic"?\s*:.*', "", raw, flags=re.DOTALL).strip()
         # If that strip consumed the entire response (raw was itself just
-        # the leaked JSON preamble, no trailing prose survives it), falling
-        # back to the untouched raw text would just re-show the same JSON
-        # blob to the user - better to say plainly that it was truncated.
-        solution = stripped or f"(reponse tronquee pour: {task[:80]})"
-    solution = _strip_protocol_leakage(solution) or f"(reponse tronquee pour: {task[:80]})"
+        # the leaked JSON preamble, no trailing prose survives it), there is
+        # no answer to show. Never manufacture a fake answer from the task.
+        solution = stripped
+    solution = _strip_protocol_leakage(solution or "")
+    if not solution:
+        raise ValueError(
+            "La réponse compacte ne contient aucune solution exploitable ; "
+            "une relance en mode détaillé est nécessaire."
+        )
 
     low_confidence_vote = (
         '{{"resolved": false, "confidence": 0.3, '
