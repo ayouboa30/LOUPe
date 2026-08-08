@@ -4289,3 +4289,50 @@ body[data-visual-theme="cody"] .gmail-config-form {
   font-size: 11.5px;
   opacity: 0.8;
 }
+
+/* ---------- Published platform downloads ---------- */
+
+.platform-downloads {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+a.platform-download {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 2px solid #36364a;
+  border-radius: 2px;
+  background: #6657d9;
+  box-shadow: 2px 2px 0 #36364a;
+  color: #fff;
+  cursor: pointer;
+  font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-align: center;
+  text-decoration: none !important;
+  text-transform: uppercase;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+
+a.platform-download:hover,
+a.platform-download:focus-visible {
+  background: #7568e5;
+  color: #fff;
+  outline: none;
+  box-shadow: 1px 1px 0 #36364a;
+  transform: translate(1px, 1px);
+}
+
+a.platform-download-linux {
+  background: #5d9de3;
+}
+
+a.platform-download-linux:hover,
+a.platform-download-linux:focus-visible {
+  background: #4789d0;
+}

@@ -1,0 +1,59 @@
+name: Build and publish Linux bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub Release tag that receives the Linux bundle
+        required: true
+        default: beta-0.1
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Linux runtime and build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config libgtk-3-dev tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
+          sudo apt-get install -y libwebkit2gtk-4.1-dev || sudo apt-get install -y libwebkit2gtk-4.0-dev
+
+      - name: Install LOUPe and PyInstaller
+        run: python -m pip install -e ".[desktop,desktop-linux,web,llama]" pyinstaller
+
+      - name: Build Linux bundle
+        run: bash build_linux.sh
+
+      - name: Package Linux bundle
+        shell: bash
+        run: |
+          asset="LOUPe-linux-x86_64.tar.gz"
+          tar -czf "$asset" -C dist 3loop
+          sha256sum "$asset" > "$asset.sha256"
+          test -s "$asset"
+          test -s "$asset.sha256"
+
+      - name: Upload Linux bundle to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            LOUPe-linux-x86_64.tar.gz \
+            LOUPe-linux-x86_64.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

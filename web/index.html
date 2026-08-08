@@ -163,13 +163,16 @@
         <span class="platform-status-dot" aria-hidden="true"></span>
         <span><strong>Windows</strong> · exécutable et installeur disponibles</span>
       </div>
-      <div class="platform-status platform-status-pending">
+      <div class="platform-status platform-status-ready">
         <span class="platform-status-dot" aria-hidden="true"></span>
-        <span><strong>Linux</strong> · bundle à générer sur une machine Linux</span>
+        <span><strong>Linux</strong> · bundle x86_64 publié dans GitHub Releases</span>
       </div>
       <code class="platform-command">bash build_linux.sh</code>
-      <p class="panel-hint platform-note">Depuis la racine du dépôt, avec Python 3 et PyInstaller. OCR Linux optionnel : Tesseract.</p>
-      <button class="platform-download" type="button" disabled aria-disabled="true">Paquet Linux public bientôt disponible</button>
+      <p class="panel-hint platform-note">Les téléchargements passent par GitHub Releases. Le bundle Linux inclut l’interface et le moteur local ; Tesseract reste optionnel pour l’OCR.</p>
+      <div class="platform-downloads">
+        <a class="platform-download platform-download-windows" href="https://github.com/ayouboa30/LOUPe/releases/download/beta-0.1/Setup_LOUPe_beta_0.1.exe" target="_blank" rel="noopener">Installer Windows (.exe)</a>
+        <a class="platform-download platform-download-linux" href="https://github.com/ayouboa30/LOUPe/releases/download/beta-0.1/LOUPe-linux-x86_64.tar.gz" target="_blank" rel="noopener">Installer Linux (.tar.gz)</a>
+      </div>
     </div>
 
     <div class="panel-card scientific-search-card">
