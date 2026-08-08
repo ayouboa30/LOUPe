@@ -1129,7 +1129,16 @@ saveDiscussionButton.addEventListener("click", async () => {
       };
     })
     .filter((message) => message.text);
-  if (messages.length === 0) return;
+  if (messages.length === 0) {
+    // Used to `return` silently: the button appeared dead, with nothing
+    // said about why. Saving an empty chat is a no-op, but the user has to
+    // be told that rather than left guessing whether the feature is broken.
+    setCompactStatus(
+      "Rien à sauvegarder pour l’instant : pose d’abord une question.",
+      "warn",
+    );
+    return;
+  }
   const firstUserMessage = messages.find((message) => message.role === "user");
   const discussion = normalizeDiscussion({
     id: `disc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,

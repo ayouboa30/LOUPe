@@ -85,7 +85,10 @@ sont présents.
 
 ## Installation Windows (LOUPe beta 0.1)
 
-Télécharge `Setup_LOUPe_beta_0.1.exe` depuis le site et lance-le. L’assistant
+Télécharge `Setup_LOUPe_beta_0.1.exe` depuis
+[www.ayoubouladali.com/projects.html#loupe-beta](https://www.ayoubouladali.com/projects.html#loupe-beta)
+(ou directement la [dernière release GitHub](https://github.com/ayouboa30/LOUPe/releases/latest))
+et lance-le. L’assistant
 permet de refuser séparément WebView2, Node.js, Codex, OpenCode, Claude Code,
 Ollama, les profils Qwen3 et un éventuel modèle GGUF. Les modèles ne sont
 jamais embarqués dans l’EXE : ils sont téléchargés uniquement si l’utilisateur
