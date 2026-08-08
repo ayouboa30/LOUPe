@@ -31,7 +31,8 @@ For each function call, return a json object with function name and arguments wi
 {{- $last := eq (len (slice $.Messages $i)) 1 -}}
 {{- if eq .Role "user" }}
 <|im_start|>user
-{{ .Content }}<|im_end|>
+{{ .Content }}
+{{- if eq $i $lastUserIdx }} /no_think{{ end -}}<|im_end|>
 {{ else if eq .Role "assistant" }}
 <|im_start|>assistant
 {{ if (and $.IsThinkSet (and .Thinking (or $last (gt $i $lastUserIdx)))) -}}

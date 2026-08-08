@@ -24,10 +24,19 @@ desktop = [
   "numpy>=1.24",
   "psutil>=5.9",
   "pypdf>=4.0",
+]
+# Windows-only native companion, OCR and speech integrations. Keep these out
+# of the generic desktop extra so Linux/macOS can install the main window.
+desktop-windows = [
   "winocr==0.0.15",
   "winrt-runtime==3.2.1",
   "winrt-Windows.Media.Ocr==3.2.1",
   "winrt-Windows.Media.SpeechRecognition==3.2.1",
+]
+# pytesseract is the Python bridge; Linux still needs the system Tesseract
+# binary and language packs (tesseract-ocr, tesseract-ocr-fra, ...).
+desktop-linux = [
+  "pytesseract==0.3.13",
 ]
 eye-tracking = [
   "opencv-contrib-python==5.0.0.93",

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import os
+import sys
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -185,17 +186,73 @@ class LlamaCppBackend(SharedLLMBackend):
             "n_threads": physical,
             "n_threads_batch": max(physical, int(physical * 1.5)),
             "flash_attn": True,
+            # Keep the quantized weights memory-mapped from the GGUF file. This
+            # keeps the model on disk-backed pages instead of copying a second
+            # full weight buffer into RAM; the OS still needs enough RAM/VRAM
+            # for the pages actually used and for the KV cache.
+            "use_mmap": True,
+            "use_mlock": False,
             "verbose": False,
         }
         defaults.update(dict(model_kwargs or {}))
         try:
             self._llama = Llama(model_path=model_path, **defaults)
         except (TypeError, ValueError):
-            # Older llama-cpp-python builds reject flash_attn; it is a small
-            # (~4%) win, never a requirement.
+            # Older llama-cpp-python builds may reject one of the optional
+            # performance flags. Keep mmap when possible, but never make it a
+            # hard requirement for an otherwise compatible GGUF build.
             defaults.pop("flash_attn", None)
-            self._llama = Llama(model_path=model_path, **defaults)
+            try:
+                self._llama = Llama(model_path=model_path, **defaults)
+            except (TypeError, ValueError):
+                defaults.pop("use_mmap", None)
+                defaults.pop("use_mlock", None)
+                self._llama = Llama(model_path=model_path, **defaults)
         self._n_ctx = int(defaults["n_ctx"])
+
+    @staticmethod
+    def discover_local_gguf(
+        roots: Sequence[str | os.PathLike[str]] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Find standalone GGUF files in the app and user model folders.
+
+        The installer puts downloads beside the frozen app, while source
+        checkouts and manually copied models use ``models/`` or
+        ``~/.3loop/models``. An explicit ``LOUPE_MODELS_DIR`` takes priority
+        so advanced users can keep multi-gigabyte weights on another disk.
+        """
+
+        if roots is None:
+            configured = os.environ.get("LOUPE_MODELS_DIR", "").strip()
+            roots = [Path(configured)] if configured else []
+            if getattr(sys, "frozen", False):
+                executable_dir = Path(sys.executable).resolve().parent
+                roots.extend((executable_dir / "models", executable_dir.parent / "models"))
+            else:
+                roots.append(Path(__file__).resolve().parent.parent / "models")
+            local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+            if local_app_data:
+                roots.append(Path(local_app_data) / "LOUPe" / "models")
+            roots.append(Path.home() / ".3loop" / "models")
+
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw_root in roots:
+            root = Path(raw_root).expanduser()
+            if not root.is_dir():
+                continue
+            for path in root.rglob("*.gguf"):
+                if not path.is_file():
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except OSError:
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                found.append((f"{path.stem} · GGUF local", resolved))
+        return sorted(found, key=lambda item: item[0].casefold())
 
     @staticmethod
     def discover_ollama_models() -> list[tuple[str, str]]:

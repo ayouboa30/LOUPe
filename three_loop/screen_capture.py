@@ -47,7 +47,29 @@ HANDLE = wintypes.HANDLE
 user32.DefWindowProcW.restype = LRESULT
 user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 user32.CreateWindowExW.restype = wintypes.HWND
+user32.CreateWindowExW.argtypes = [
+    wintypes.DWORD,
+    wintypes.LPCWSTR,
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.HWND,
+    wintypes.HMENU,
+    wintypes.HINSTANCE,
+    ctypes.c_void_p,
+]
+user32.RegisterClassW.restype = wintypes.ATOM
+user32.RegisterClassW.argtypes = [ctypes.c_void_p]
+user32.UnregisterClassW.restype = wintypes.BOOL
+user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+user32.GetMessageW.restype = ctypes.c_int
 user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 user32.GetDC.restype = HANDLE
 user32.GetDC.argtypes = [wintypes.HWND]
 user32.ReleaseDC.argtypes = [wintypes.HWND, HANDLE]
@@ -56,7 +78,12 @@ user32.SetLayeredWindowAttributes.argtypes = [wintypes.HWND, wintypes.COLORREF, 
 user32.LoadCursorW.restype = HANDLE
 user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
 user32.SetCursor.argtypes = [HANDLE]
+user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 user32.DestroyWindow.argtypes = [wintypes.HWND]
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+kernel32.GetModuleHandleW.restype = wintypes.HINSTANCE
+kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 gdi32.SetROP2.argtypes = [HANDLE, ctypes.c_int]
 gdi32.Rectangle.argtypes = [HANDLE, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 gdi32.GetStockObject.restype = HANDLE
@@ -124,20 +151,25 @@ class _RegionSelector:
         self._last_drawn: tuple[int, int, int, int] | None = None
         self._result: tuple[int, int, int, int] | None = None
         self._wndproc_ref = WNDPROC(self._wndproc)
+        self._class_name = f"ThreeLoopRegionSelector_{id(self):x}"
         self._pen = gdi32.CreatePen(0, 2, 0x00E1CBAB)  # solid, 2px, accent-ish BGR
 
     def run(self) -> tuple[int, int, int, int] | None:
         """Block until the user finishes (or cancels) a drag; return the rect."""
 
         hinstance = kernel32.GetModuleHandleW(None)
-        class_name = "ThreeLoopRegionSelector"
+        class_name = self._class_name
         wndclass = _WNDCLASS()
         wndclass.style = 0
         wndclass.lpfnWndProc = ctypes.cast(self._wndproc_ref, ctypes.c_void_p)
         wndclass.hInstance = hinstance
         wndclass.hCursor = None  # cursor is set explicitly to a crosshair below
         wndclass.lpszClassName = class_name
-        user32.RegisterClassW(ctypes.byref(wndclass))
+        if not user32.RegisterClassW(ctypes.byref(wndclass)):
+            error = ctypes.get_last_error()
+            gdi32.DeleteObject(self._pen)
+            self._pen = None
+            raise OSError(error, f"RegisterClassW a échoué pour {class_name}")
 
         x = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         y = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
@@ -149,30 +181,44 @@ class _RegionSelector:
             class_name, "3loop-select", WS_POPUP,
             x, y, w, h, None, None, hinstance, None,
         )
+        if not hwnd:
+            error = ctypes.get_last_error()
+            user32.UnregisterClassW(class_name, hinstance)
+            gdi32.DeleteObject(self._pen)
+            self._pen = None
+            raise OSError(error, "CreateWindowExW a échoué pour le sélecteur d'écran")
+
         self._hwnd = hwnd
-        # Uniform per-window alpha (not per-pixel UpdateLayeredWindow): a
-        # simple dim overlay is all this needs, and it lets ordinary GDI
-        # drawing (the marquee rectangle) work directly on the window's DC.
-        user32.SetLayeredWindowAttributes(hwnd, 0, 90, LWA_ALPHA)
-        cross = user32.LoadCursorW(None, ctypes.cast(ctypes.c_void_p(IDC_CROSS), wintypes.LPCWSTR))
-        user32.SetCursor(cross)
-        user32.ShowWindow(hwnd, 5)
-        user32.SetForegroundWindow(hwnd)
+        try:
+            # Uniform per-window alpha (not per-pixel UpdateLayeredWindow): a
+            # simple dim overlay is all this needs, and it lets ordinary GDI
+            # drawing (the marquee rectangle) work directly on the window's DC.
+            user32.SetLayeredWindowAttributes(hwnd, 0, 90, LWA_ALPHA)
+            cross = user32.LoadCursorW(
+                None, ctypes.cast(ctypes.c_void_p(IDC_CROSS), wintypes.LPCWSTR)
+            )
+            user32.SetCursor(cross)
+            user32.ShowWindow(hwnd, 5)
+            user32.SetForegroundWindow(hwnd)
 
-        msg = wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+        finally:
+            # The callback is held by this instance, so destroy the window and
+            # unregister its unique class before the worker can release it.
+            user32.DestroyWindow(hwnd)
+            self._hwnd = None
+            user32.UnregisterClassW(class_name, hinstance)
+            gdi32.DeleteObject(self._pen)
+            self._pen = None
+            # Belt and braces: leave the calling thread's queue clean whatever
+            # happened above. This selector is opened from a worker thread that
+            # goes on to run another modal loop (the question card), and a
+            # leftover WM_QUIT must not abort that second loop.
+            _drain_quit_messages()
 
-        user32.DestroyWindow(hwnd)
-        gdi32.DeleteObject(self._pen)
-        # Belt and braces: leave the calling thread's queue clean whatever
-        # happened above. This selector is opened from a worker thread that
-        # goes on to run another modal loop (the question card), and a single
-        # leftover WM_QUIT is enough to make that loop exit before showing
-        # anything. Draining is safe because this thread owns no other window
-        # by now - the overlay was the only one and it is already destroyed.
-        _drain_quit_messages()
         if self._result is None:
             return None
         # Translate back to virtual-screen (multi-monitor) coordinates.
@@ -254,4 +300,12 @@ def select_region_and_capture() -> Image.Image | None:
     rect = _RegionSelector().run()
     if rect is None:
         return None
-    return ImageGrab.grab(bbox=rect)
+    # The selector returns virtual-screen coordinates, including negative
+    # values on a monitor left of the primary display. Pillow otherwise
+    # assumes the primary screen and can reject or crop the selected box.
+    try:
+        return ImageGrab.grab(bbox=rect, all_screens=True)
+    except TypeError:
+        # Keep compatibility with older Pillow builds that do not expose the
+        # multi-monitor flag; primary-monitor selections still work there.
+        return ImageGrab.grab(bbox=rect)

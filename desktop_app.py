@@ -51,6 +51,10 @@ def _write_log(text: str) -> None:
 
 
 def _show_message_box(title: str, message: str) -> None:
+    """Show the Windows fallback notice without making non-Windows fragile."""
+
+    if sys.platform != "win32":
+        return
     try:
         ctypes.windll.user32.MessageBoxW(0, message, title, 0x00000030)  # MB_ICONWARNING
     except Exception:
@@ -203,6 +207,20 @@ def _open_native_window(
         # running: the engine server thread and the widget's own message
         # loop are untouched.
         def _hide_instead_of_close() -> bool:
+            # The mascot owns the application lifetime on Windows. On Linux
+            # and macOS it is intentionally unavailable, so the main window's
+            # close button must really close pywebview instead of hiding the
+            # only visible entry point forever.
+            if NativeWidget is None:
+                if on_quit is not None:
+                    try:
+                        on_quit()
+                    except Exception:
+                        _write_log(
+                            "Nettoyage à la fermeture impossible:\n"
+                            f"{traceback.format_exc()}"
+                        )
+                return True
             try:
                 main_window.hide()
             except Exception:
@@ -275,14 +293,22 @@ def main() -> None:
         # Native window unavailable (e.g. no WebView2 runtime): the engine
         # server is plain HTTP, so any browser can drive the same UI.
         webbrowser.open(url)
-        _show_message_box(
-            "LOUPe",
-            "La fenetre native n'a pas pu s'ouvrir (WebView2 manquant probablement).\n"
-            "LOUPe a ete lance dans ton navigateur par defaut a la place:\n"
-            f"{url}\n\n"
-            "Pour la fenetre native, installe le WebView2 Runtime:\n"
-            "https://go.microsoft.com/fwlink/?LinkId=2124703",
+        fallback_message = (
+            "La fenetre native n'a pas pu s'ouvrir.\n"
+            "LOUPe a ete lance dans ton navigateur par defaut:\n"
+            f"{url}"
         )
+        if sys.platform == "win32":
+            fallback_message += (
+                "\n\nPour la fenetre native, installe le WebView2 Runtime:\n"
+                "https://go.microsoft.com/fwlink/?LinkId=2124703"
+            )
+        else:
+            fallback_message += (
+                "\n\nPour la fenetre integree sous Linux, installe pywebview "
+                "avec un backend GTK ou Qt et ses bibliotheques systeme."
+            )
+        _show_message_box("LOUPe", fallback_message)
         while True:
             time.sleep(3600)
     except Exception:

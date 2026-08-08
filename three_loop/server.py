@@ -443,9 +443,42 @@ def _coding_cli_config(name: str) -> dict[str, Any]:
 #: and are not meant to answer three short "what should I search for" prompts.
 #: The 4B profile remains the chat model when reasoning is enabled; Flash is
 #: a separate 1.7B direct-answer profile for Internet query planning.
+#: Model profiles installed by the Windows bootstrapper. The two ``flash``
+#: profiles use custom Ollama templates with thinking disabled; the plain
+#: profiles keep Qwen3's reasoning behavior. The UI exposes these as four
+#: user-facing reflection levels instead of making the user guess model tags.
+QWEN3_FLASH_LITE_MODEL = "qwen3:1.7b-flash"
+QWEN3_FLASH_MODEL = "qwen3:1.7b"
+QWEN3_HIGH_MODEL = "qwen3:4b-flash"
 QWEN3_THINKING_MODEL = "qwen3:4b"
-QWEN3_FLASH_MODEL = "qwen3:1.7b-flash"
-RESEARCH_MODEL = QWEN3_FLASH_MODEL
+REFLECTION_LEVELS = (
+    {
+        "id": "lite",
+        "label": "Flash lite",
+        "model": QWEN3_FLASH_LITE_MODEL,
+        "description": "Qwen3 1.7B Flash · rapide, sans raisonnement long",
+    },
+    {
+        "id": "flash",
+        "label": "Flash",
+        "model": QWEN3_FLASH_MODEL,
+        "description": "Qwen3 1.7B · compromis vitesse/raisonnement",
+    },
+    {
+        "id": "high",
+        "label": "Élevé",
+        "model": QWEN3_HIGH_MODEL,
+        "description": "Qwen3 4B Flash · plus capable, réponse directe",
+    },
+    {
+        "id": "very_high",
+        "label": "Très élevé",
+        "model": QWEN3_THINKING_MODEL,
+        "description": "Qwen3 4B · raisonnement approfondi",
+    },
+)
+REFLECTION_MODEL_MAP = {item["id"]: item["model"] for item in REFLECTION_LEVELS}
+RESEARCH_MODEL = QWEN3_FLASH_LITE_MODEL
 RESEARCH_MAX_TOKENS = 96
 
 #: Resolved once per process: discovery walks the Ollama blob store and pings
@@ -569,12 +602,15 @@ def _support_backend(main_backend: SharedLLMBackend) -> SharedLLMBackend:
 
 
 def _discover_local_gguf() -> list[tuple[str, str]]:
-    """List local GGUF weights, or nothing when llama-cpp-python is absent."""
+    """List standalone GGUF files first, then Ollama blobs as a fallback."""
 
-    try:
-        return LlamaCppBackend.discover_ollama_models()
-    except Exception:
-        return []
+    found = LlamaCppBackend.discover_local_gguf()
+    seen = {path for _label, path in found}
+    for label, path in LlamaCppBackend.discover_ollama_models():
+        if path not in seen:
+            found.append((label, path))
+            seen.add(path)
+    return found
 
 
 def _web_dir() -> Path:
@@ -612,12 +648,19 @@ def _ollama_thinking_setting(payload: dict[str, Any]) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
-def _resolve_ollama_model(model: str, thinking: bool | None) -> str:
-    """Use the explicit 1.7B Flash profile when Qwen3 4B Thinking is off."""
+def _resolve_ollama_model(
+    model: str,
+    thinking: bool | None,
+    reflection_level: Any = "",
+) -> str:
+    """Resolve a user-facing reflection level to an installed Ollama tag."""
 
     requested = model.strip()
+    level = str(reflection_level or "").strip().lower()
+    if level in REFLECTION_MODEL_MAP:
+        requested = REFLECTION_MODEL_MAP[level]
     if requested.casefold() == QWEN3_THINKING_MODEL and thinking is False:
-        return QWEN3_FLASH_MODEL
+        return QWEN3_HIGH_MODEL
     return requested
 
 
@@ -671,7 +714,7 @@ def _build_backend(
         return CloudApiBackend.for_provider("nvidia", payload["model"], payload.get("api_key", ""))
     if backend_name == "igpu":
         thinking = _ollama_thinking_setting(payload)
-        model = _resolve_ollama_model((payload.get("model") or "").strip(), thinking)
+        model = _resolve_ollama_model((payload.get("model") or "").strip(), thinking, payload.get("reflection_level"))
         if not model:
             raise ValueError("aucun modele Ollama disponible pour le mode iGPU")
         host = ensure_igpu_server()
@@ -683,7 +726,7 @@ def _build_backend(
         return OllamaBackend(model, host=host, thinking=thinking)
     if backend_name == "ollama":
         thinking = _ollama_thinking_setting(payload)
-        model = _resolve_ollama_model(payload.get("model", ""), thinking)
+        model = _resolve_ollama_model(payload.get("model", ""), thinking, payload.get("reflection_level"))
         if not model:
             raise ValueError("aucun modele Ollama disponible; lancez `ollama serve` et `ollama pull <modele>`")
         return OllamaBackend(model, thinking=thinking)
@@ -1044,6 +1087,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "ollama_models": OllamaBackend.list_models(),
+                    "reflection_levels": [dict(item) for item in REFLECTION_LEVELS],
                     "local_gguf": [
                         {"label": label, "path": path}
                         for label, path in _discover_local_gguf()
@@ -1274,16 +1318,16 @@ class Handler(BaseHTTPRequestHandler):
             # Qwen3 4B Thinking profile can turn 25 short summaries into a
             # several-minute sequential job.
             installed = OllamaBackend.list_models(timeout=1.5)
-            if not any(name.casefold() == QWEN3_FLASH_MODEL for name in installed):
+            if not any(name.casefold() == QWEN3_FLASH_LITE_MODEL for name in installed):
                 raise ValueError(
-                    f"Le modèle local {QWEN3_FLASH_MODEL} est absent; "
+                    f"Le modèle local {QWEN3_FLASH_LITE_MODEL} est absent; "
                     "les résumés heuristiques restent disponibles."
                 )
             backend = _build_backend(
                 {
                     **payload,
                     "backend": "ollama",
-                    "model": QWEN3_FLASH_MODEL,
+                    "model": QWEN3_FLASH_LITE_MODEL,
                     "thinking": False,
                     "allow_writes": False,
                     "workspace_path": "",
@@ -1301,7 +1345,7 @@ class Handler(BaseHTTPRequestHandler):
                 "count": len(analysed),
                 "analysis_mode": "model" if backend is not None else "heuristic",
                 "analysis_backend": "ollama" if backend is not None else "",
-                "analysis_model": QWEN3_FLASH_MODEL if backend is not None else "",
+                "analysis_model": QWEN3_FLASH_LITE_MODEL if backend is not None else "",
                 "analysis_warning": backend_error,
                 "query": query,
                 "account": _GMAIL_CLIENT.status().get("email", ""),

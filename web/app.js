@@ -127,6 +127,7 @@ const composerEl = el("composer");
 const promptInput = el("prompt-input");
 const sendBtn = el("send-btn");
 const backendSelect = el("backend-select");
+const modelSection = el("model-section");
 const modelSelect = el("model-select");
 const apiKeySection = el("api-key-section");
 const apiKeyInput = el("api-key");
@@ -140,6 +141,9 @@ const codingWorkspaceInput = el("coding-workspace");
 const codingWriteHint = el("coding-write-hint");
 const researchToggle = el("research-toggle");
 const thinkingControl = el("thinking-control");
+const reflectionSection = el("reflection-section");
+const reflectionSelect = el("reflection-select");
+const reflectionHint = el("reflection-hint");
 const thinkingToggle = el("thinking-toggle");
 const cyclesRange = el("cycles-range");
 const cyclesValue = el("cycles-value");
@@ -1700,13 +1704,36 @@ async function saveNotebookNote() {
 
 // ---------------------------------------------------------------- config / backend selection
 
-// Qwen3 4B is the quality-oriented chat profile. Its current Ollama tag on
-// this machine does not reliably honour think:false, so turning Thinking off
-// intentionally routes to the separate 1.7B template that permanently
-// pre-fills /no_think. The Flash tag is never presented as a thinking model.
+// The installer creates four local Qwen3 profiles. Flash profiles use the
+// bundled Modelfiles with thinking disabled; the plain profiles keep Qwen3's
+// reasoning template. The selector exposes intent, not raw Ollama tags.
+const REFLECTION_LEVELS_FALLBACK = [
+  { id: "lite", label: "Flash lite", model: "qwen3:1.7b-flash", description: "Qwen3 1.7B Flash · rapide, sans raisonnement long" },
+  { id: "flash", label: "Flash", model: "qwen3:1.7b", description: "Qwen3 1.7B · compromis vitesse/raisonnement" },
+  { id: "high", label: "Élevé", model: "qwen3:4b-flash", description: "Qwen3 4B Flash · plus capable, réponse directe" },
+  { id: "very_high", label: "Très élevé", model: "qwen3:4b", description: "Qwen3 4B · raisonnement approfondi" },
+];
+const QWEN3_FLASH_LITE_MODEL = "qwen3:1.7b-flash";
+const QWEN3_FLASH_MODEL = "qwen3:1.7b";
+const QWEN3_HIGH_MODEL = "qwen3:4b-flash";
 const QWEN3_THINKING_MODEL = "qwen3:4b";
-const QWEN3_FLASH_MODEL = "qwen3:1.7b-flash";
 const THINKING_BACKENDS = new Set(["ollama", "igpu"]);
+
+function reflectionLevels() {
+  const configured = state.config && Array.isArray(state.config.reflection_levels)
+    ? state.config.reflection_levels
+    : [];
+  return configured.length ? configured : REFLECTION_LEVELS_FALLBACK;
+}
+
+function reflectionLevelModel(level = reflectionSelect?.value) {
+  const found = reflectionLevels().find((item) => item.id === String(level || ""));
+  return found ? String(found.model || "") : QWEN3_FLASH_LITE_MODEL;
+}
+
+function isOllamaBackend(backend = backendSelect.value) {
+  return backend === "ollama" || backend === "igpu";
+}
 
 function normalizedModelName(model) {
   return String(model || "").trim().toLowerCase();
@@ -1724,8 +1751,6 @@ function supportsThinking(backend = backendSelect.value, model = selectedModel()
 function storedThinkingPreference(model) {
   try {
     const stored = localStorage.getItem(thinkingStorageKey(model));
-    // The primary local profile starts in its high-quality Qwen3 4B mode;
-    // users can opt into Flash with one click and the preference persists.
     return stored === null ? true : stored === "1";
   } catch {
     return true;
@@ -1733,12 +1758,21 @@ function storedThinkingPreference(model) {
 }
 
 function selectedThinkingValue(backend = backendSelect.value, model = selectedModel()) {
+  // The four-level selector is authoritative for local Ollama/iGPU profiles.
+  // The old checkbox remains available only to a non-profile/manual caller.
+  if (isOllamaBackend(backend)) return null;
   if (!supportsThinking(backend, model)) return null;
   return thinkingToggle ? Boolean(thinkingToggle.checked) : storedThinkingPreference(model);
 }
 
 function updateThinkingControl() {
   if (!thinkingControl || !thinkingToggle) return;
+  if (isOllamaBackend()) {
+    thinkingControl.hidden = true;
+    thinkingToggle.disabled = true;
+    thinkingToggle.checked = false;
+    return;
+  }
   const supported = supportsThinking();
   thinkingControl.hidden = !supported;
   thinkingToggle.disabled = !supported;
@@ -1749,20 +1783,55 @@ function updateThinkingControl() {
   const enabled = storedThinkingPreference(selectedModel());
   thinkingToggle.checked = enabled;
   thinkingControl.title = enabled
-    ? "Thinking actif : Qwen3 4B raisonne avant de répondre."
-    : "Thinking inactif : réponses directes avec Qwen3 1.7B Flash.";
-  thinkingToggle.setAttribute(
-    "aria-label",
-    enabled ? "Désactiver le raisonnement approfondi" : "Activer le raisonnement approfondi"
-  );
+    ? "Thinking actif : raisonnement approfondi."
+    : "Thinking inactif : réponse directe.";
 }
 
 function ollamaModelLabel(model) {
   const normalized = normalizedModelName(model);
-  if (normalized === QWEN3_THINKING_MODEL) return "Qwen3 4B · Thinking";
-  if (normalized === QWEN3_FLASH_MODEL) return "Qwen3 1.7B · Flash (sans Thinking)";
-  if (normalized === "qwen3:1.7b") return "Qwen3 1.7B";
+  if (normalized === QWEN3_FLASH_LITE_MODEL) return "Qwen3 1.7B Flash · Flash lite";
+  if (normalized === QWEN3_FLASH_MODEL) return "Qwen3 1.7B · Flash";
+  if (normalized === QWEN3_HIGH_MODEL) return "Qwen3 4B Flash · Élevé";
+  if (normalized === QWEN3_THINKING_MODEL) return "Qwen3 4B · Très élevé";
   return String(model || "");
+}
+
+function populateReflectionLevels() {
+  if (!reflectionSelect) return;
+  const stored = (() => {
+    try { return localStorage.getItem("3loop_reflection_level") || ""; } catch { return ""; }
+  })();
+  const current = reflectionSelect.dataset.initialized === "1"
+    ? reflectionSelect.value
+    : stored || reflectionSelect.value || "lite";
+  const levels = reflectionLevels();
+  const installed = new Set((state.config?.ollama_models || []).map(normalizedModelName));
+  reflectionSelect.innerHTML = levels
+    .map((item) => {
+      const available = installed.has(normalizedModelName(item.model));
+      const label = `${item.label} · ${item.description}${available ? " ✓" : " · non installé"}`;
+      return `<option value="${escapeHtml(item.id)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  reflectionSelect.value = levels.some((item) => item.id === current)
+    ? current
+    : (levels[0]?.id || "lite");
+  reflectionSelect.dataset.initialized = "1";
+  const selected = levels.find((item) => item.id === reflectionSelect.value) || levels[0];
+  const available = selected && installed.has(normalizedModelName(selected.model));
+  if (reflectionHint && selected) {
+    reflectionHint.textContent = available
+      ? `${selected.description} · modèle local disponible.`
+      : `${selected.description} · modèle absent : relance l’installation des profils Qwen3.`;
+    reflectionHint.className = available ? "hint" : "hint warn";
+  }
+}
+
+function updateReflectionControl() {
+  const local = isOllamaBackend();
+  if (reflectionSection) reflectionSection.hidden = !local;
+  if (modelSection) modelSection.hidden = local;
+  if (local) populateReflectionLevels();
 }
 
 function populateOllamaModels(models) {
@@ -1848,7 +1917,7 @@ function populateBackendOptions() {
   // This workspace now explicitly prefers the local Qwen3 profile. Cloud
   // backends remain selectable, but startup no longer silently switches away
   // from the model whose Thinking/Flash control is visible in the composer.
-  if (ollamaModels.includes(QWEN3_THINKING_MODEL)) backendSelect.value = "ollama";
+  if (reflectionLevels().some((item) => ollamaModels.includes(item.model))) backendSelect.value = "ollama";
   else if (opencode.available) backendSelect.value = "opencode";
   else if (hasStoredKey) backendSelect.value = Object.keys(state.config.cloud_providers).find((p) => loadStoredKey(p));
   else if (localGguf.length > 0) backendSelect.value = "llama_cpp";
@@ -1878,7 +1947,12 @@ function isCodingCliBackend(backend) {
   return backend === "opencode" || backend === "claude_code" || backend === "codex";
 }
 
+function selectedReflectionLevel() {
+  return isOllamaBackend() ? String(reflectionSelect?.value || "lite") : "";
+}
+
 function selectedModel() {
+  if (isOllamaBackend()) return reflectionLevelModel(selectedReflectionLevel());
   const custom = String(customModelInput && customModelInput.value || "").trim();
   return custom || String(modelSelect.value || "");
 }
@@ -1907,6 +1981,8 @@ function updateCodingWriteUI() {
 function updateBackendUI() {
   const backend = backendSelect.value;
   const cloudInfo = state.config.cloud_providers[backend];
+  if (modelSection) modelSection.hidden = false;
+  if (reflectionSection) reflectionSection.hidden = true;
 
   if (cloudInfo) {
     apiKeySection.hidden = false;
@@ -1969,7 +2045,7 @@ function updateBackendUI() {
     const models = state.config.ollama_models;
     if (models.length > 0) {
       populateOllamaModels(models);
-      backendHint.textContent = "Inférence CPU locale. Qwen3 4B raisonne si Thinking est actif ; désactive-le pour utiliser Qwen3 1.7B Flash.";
+      backendHint.textContent = "Inférence locale. Choisis Flash lite, Flash, Élevé ou Très élevé dans le sélecteur de réflexion.";
       backendHint.className = "hint";
     } else {
       modelSelect.innerHTML = "";
@@ -1983,6 +2059,7 @@ function updateBackendUI() {
     backendHint.className = "hint";
   }
   updateCodingWriteUI();
+  updateReflectionControl();
   updateThinkingControl();
 }
 
@@ -2027,6 +2104,11 @@ backendSelect.addEventListener("change", () => {
   updateBackendUI();
 });
 modelSelect.addEventListener("change", updateThinkingControl);
+if (reflectionSelect) reflectionSelect.addEventListener("change", () => {
+  try { localStorage.setItem("3loop_reflection_level", reflectionSelect.value); } catch { /* ignore */ }
+  updateReflectionControl();
+  updateThinkingControl();
+});
 if (thinkingToggle) thinkingToggle.addEventListener("change", () => {
   const backend = backendSelect.value;
   const model = selectedModel();
@@ -2147,6 +2229,7 @@ async function runPrompt(prompt, enginePrompt = prompt, controller) {
   if (!controller || !run || run.controller !== controller || controller.signal.aborted) return;
   const backend = backendSelect.value;
   const model = selectedModel();
+  const reflectionLevel = selectedReflectionLevel();
   const thinking = selectedThinkingValue(backend, model);
   const allowWrites = isCodingCliBackend(backend) && Boolean(codingWriteToggle?.checked);
   const workspacePath = allowWrites ? String(codingWorkspaceInput?.value || "").trim() : "";
@@ -2171,6 +2254,7 @@ async function runPrompt(prompt, enginePrompt = prompt, controller) {
     conversation_append: { user: prompt },
     backend,
     model,
+    reflection_level: reflectionLevel,
     api_key: apiKeyInput.value,
     allow_writes: allowWrites,
     workspace_path: workspacePath,

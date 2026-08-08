@@ -1,11 +1,31 @@
+param(
+  [string] $Model = "",
+  [string] $InstallWebView2 = "1",
+  [string] $InstallNode = "1",
+  [string] $InstallCodex = "1",
+  [string] $InstallOpenCode = "1",
+  [string] $InstallClaudeCode = "1",
+  [string] $InstallOllama = "1",
+  [string] $InstallQwenProfiles = "1",
+  [string] $GgufUrl = "",
+  [string] $GgufFileName = "",
+  [string] $GgufSizeBytes = "0",
+  [string] $ModelsDirectory = ""
+)
+
 $ErrorActionPreference = "Continue"
 $logPath = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1-install.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null
+$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 function Log([string] $Message) {
   $line = "$(Get-Date -Format o) $Message"
   Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8
   Write-Host $line
+}
+
+function Is-Enabled([string] $Value) {
+  return $Value -in @("1", "true", "yes", "on")
 }
 
 function Find-Ollama {
@@ -126,75 +146,245 @@ function Install-ClaudeCode {
 }
 
 function Prepare-CommandLineTools {
-  if (Install-NodeIfNeeded) {
-    [void](Install-NpmCli "@openai/codex@0.147.0" "codex" "Codex")
-    [void](Install-NpmCli "opencode-ai@1.18.15" "opencode" "OpenCode")
-  }
-  [void](Install-ClaudeCode)
+  $needsNode = (Is-Enabled $InstallNode) -or (Is-Enabled $InstallCodex) -or (Is-Enabled $InstallOpenCode)
+  $nodeReady = $false
+  if ($needsNode) { $nodeReady = Install-NodeIfNeeded }
+
+  if (Is-Enabled $InstallCodex) {
+    if ($nodeReady) { [void](Install-NpmCli "@openai/codex@0.147.0" "codex" "Codex") }
+    else { Log "Codex demandé mais Node.js/npm ne sont pas disponibles." }
+  } else { Log "Codex non sélectionné : installation ignorée." }
+
+  if (Is-Enabled $InstallOpenCode) {
+    if ($nodeReady) { [void](Install-NpmCli "opencode-ai@1.18.15" "opencode" "OpenCode") }
+    else { Log "OpenCode demandé mais Node.js/npm ne sont pas disponibles." }
+  } else { Log "OpenCode non sélectionné : installation ignorée." }
+
+  if (Is-Enabled $InstallClaudeCode) { [void](Install-ClaudeCode) }
+  else { Log "Claude Code non sélectionné : installation ignorée." }
 }
 
-Log "LOUPe beta 0.1 : préparation des dépendances locales."
-
-if (-not (Test-WebView2)) {
-  if (-not (Install-With-Winget "Microsoft.EdgeWebView2Runtime" "WebView2 Runtime")) {
-    Log "WebView2 Runtime non installé automatiquement. La fenêtre navigateur de secours restera disponible."
-  }
-} else {
-  Log "WebView2 Runtime déjà présent."
+function Convert-ToInt64([string] $Value) {
+  $parsed = 0L
+  if ([long]::TryParse($Value, [ref]$parsed)) { return $parsed }
+  return 0L
 }
+
+function Get-ModelsDirectory {
+  $directory = $ModelsDirectory.Trim()
+  if ([string]::IsNullOrWhiteSpace($directory)) {
+    $directory = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1\models"
+  }
+  New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  return (Resolve-Path -LiteralPath $directory).Path
+}
+
+function Test-ModelDiskSpace([string] $Directory, [long] $RequiredBytes) {
+  if ($RequiredBytes -le 0) { return $true }
+  try {
+    $root = [IO.Path]::GetPathRoot($Directory)
+    if ([string]::IsNullOrWhiteSpace($root)) { return $true }
+    $drive = New-Object System.IO.DriveInfo($root)
+    $reserve = 256MB
+    if ($drive.AvailableFreeSpace -lt ($RequiredBytes + $reserve)) {
+      Log "Espace disque insuffisant pour le modèle : $([math]::Round($RequiredBytes / 1GB, 2)) Go requis, $([math]::Round($drive.AvailableFreeSpace / 1GB, 2)) Go disponibles."
+      return $false
+    }
+  } catch {
+    Log "Impossible de vérifier l'espace disque : $($_.Exception.Message). Le téléchargement continue."
+  }
+  return $true
+}
+
+function Download-GgufModel {
+  $url = $GgufUrl.Trim()
+  if ([string]::IsNullOrWhiteSpace($url)) {
+    Log "Aucun modèle GGUF sélectionné : téléchargement llama.cpp ignoré."
+    return $true
+  }
+  if ($url -notmatch '^https://') {
+    Log "URL GGUF refusée : seules les URL HTTPS sont acceptées."
+    return $false
+  }
+
+  $name = $GgufFileName.Trim()
+  if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.gguf$') {
+    Log "Nom GGUF refusé : $name."
+    return $false
+  }
+  $directory = Get-ModelsDirectory
+  $target = Join-Path $directory $name
+  $partial = "$target.partial"
+  $expected = Convert-ToInt64 $GgufSizeBytes
+
+  if ((Test-Path -LiteralPath $target) -and (($expected -le 0) -or ((Get-Item -LiteralPath $target).Length -eq $expected))) {
+    Log "Modèle GGUF déjà présent : $target."
+    return $true
+  }
+  if (-not (Test-ModelDiskSpace $directory $expected)) { return $false }
+
+  Log "Téléchargement GGUF vers $target. Les poids restent sur le disque et peuvent dépasser plusieurs Go."
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $client = New-Object System.Net.Http.HttpClient
+    $client.Timeout = [TimeSpan]::FromHours(12)
+    $response = $client.GetAsync($url, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+      Log "Téléchargement GGUF refusé par le serveur : HTTP $([int]$response.StatusCode)."
+      return $false
+    }
+    $stream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+    $fileStream = [IO.File]::Open($partial, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $buffer = New-Object byte[] (1024 * 1024)
+    $total = 0L
+    $lastLog = 0L
+    try {
+      while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+        $fileStream.Write($buffer, 0, $read)
+        $total += $read
+        if (($total - $lastLog) -ge 256MB) {
+          Log "GGUF téléchargé : $([math]::Round($total / 1GB, 2)) Go."
+          $lastLog = $total
+        }
+      }
+    } finally {
+      $fileStream.Dispose()
+      $stream.Dispose()
+      $response.Dispose()
+      $client.Dispose()
+    }
+    if (($expected -gt 0) -and ($total -ne $expected)) {
+      Log "Taille GGUF inattendue : $total octets reçus, $expected attendus."
+      return $false
+    }
+    Move-Item -LiteralPath $partial -Destination $target -Force
+    Log "Modèle GGUF prêt : $target ($([math]::Round($total / 1GB, 2)) Go)."
+    return $true
+  } catch {
+    Log "Échec du téléchargement GGUF : $($_.Exception.Message)"
+    return $false
+  } finally {
+    if (Test-Path -LiteralPath $partial) {
+      Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Start-OllamaApi([string] $OllamaPath) {
+  try {
+    $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+    return $true
+  } catch {
+    Log "Démarrage du serveur Ollama."
+    Start-Process -FilePath $OllamaPath -ArgumentList "serve" -WindowStyle Hidden | Out-Null
+    for ($i = 0; $i -lt 30; $i++) {
+      Start-Sleep -Seconds 1
+      try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
+        return $true
+      } catch { }
+    }
+  }
+  return $false
+}
+
+function Ollama-HasModel([string] $ModelTag) {
+  try {
+    $tags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 5
+    return @($tags.models | Where-Object { $_.name -eq $ModelTag -or $_.model -eq $ModelTag }).Count -gt 0
+  } catch {
+    Log "Impossible de lire les modèles Ollama : $($_.Exception.Message)"
+    return $false
+  }
+}
+
+function Install-OllamaModel([string] $OllamaPath, [string] $ModelTag) {
+  $tag = $ModelTag.Trim()
+  if ([string]::IsNullOrWhiteSpace($tag)) { return $true }
+  if (Ollama-HasModel $tag) {
+    Log "Modèle Ollama déjà présent : $tag."
+    return $true
+  }
+  Log "Téléchargement du modèle Ollama : $tag."
+  & $OllamaPath pull $tag *>&1 | ForEach-Object { Log $_.ToString() }
+  if ($LASTEXITCODE -ne 0) {
+    Log "Le téléchargement de $tag a échoué; LOUPe pourra utiliser un autre profil."
+    return $false
+  }
+  return $true
+}
+
+function Create-OllamaProfile([string] $OllamaPath, [string] $Tag, [string] $FileName) {
+  $modelfile = Join-Path $scriptRoot $FileName
+  if (-not (Test-Path -LiteralPath $modelfile)) {
+    Log "Modelfile absent : $FileName. Profil $Tag non créé."
+    return $false
+  }
+  if (Ollama-HasModel $Tag) {
+    Log "Profil Ollama déjà présent : $Tag."
+    return $true
+  }
+  Log "Création du profil Ollama $Tag à partir de $FileName."
+  & $OllamaPath create $Tag -f $modelfile *>&1 | ForEach-Object { Log $_.ToString() }
+  if ($LASTEXITCODE -ne 0) {
+    Log "La création du profil $Tag a échoué."
+    return $false
+  }
+  return $true
+}
+
+function Prepare-Ollama {
+  if (-not (Is-Enabled $InstallOllama)) {
+    Log "Ollama non sélectionné : installation et téléchargement ignorés."
+    return
+  }
+
+  $ollama = Find-Ollama
+  if (-not $ollama) {
+    if (Install-With-Winget "Ollama.Ollama" "Ollama") { $ollama = Find-Ollama }
+  }
+  if (-not $ollama) {
+    Log "Ollama absent après l'installation. Les profils locaux ne seront pas disponibles."
+    return
+  }
+
+  Log "Ollama trouvé : $ollama"
+  if (-not (Start-OllamaApi $ollama)) {
+    Log "API Ollama indisponible; les profils seront préparés au prochain lancement."
+    return
+  }
+
+  if (Is-Enabled $InstallQwenProfiles) {
+    # One download per base model; the two Flash profiles only change the
+    # chat template and therefore reuse these same weights.
+    [void](Install-OllamaModel $ollama "qwen3:1.7b")
+    [void](Install-OllamaModel $ollama "qwen3:4b")
+    [void](Create-OllamaProfile $ollama "qwen3:1.7b-flash" ".qwen3-1.7b-flash.Modelfile")
+    [void](Create-OllamaProfile $ollama "qwen3:4b-flash" ".qwen3-4b-flash.Modelfile")
+  } else {
+    Log "Profils Qwen3 natifs non sélectionnés."
+  }
+
+  # Keep the old -Model parameter useful for scripted installations and
+  # custom tags, without forcing it in the interactive installer.
+  if (-not [string]::IsNullOrWhiteSpace($Model)) {
+    [void](Install-OllamaModel $ollama $Model)
+  }
+}
+
+Log "LOUPe beta 0.1 : préparation des composants sélectionnés."
+
+if (Is-Enabled $InstallWebView2) {
+  if (-not (Test-WebView2)) {
+    if (-not (Install-With-Winget "Microsoft.EdgeWebView2Runtime" "WebView2 Runtime")) {
+      Log "WebView2 Runtime non installé automatiquement. La fenêtre navigateur de secours restera disponible."
+    }
+  } else { Log "WebView2 Runtime déjà présent." }
+} else { Log "WebView2 non sélectionné : installation ignorée." }
 
 Prepare-CommandLineTools
+Prepare-Ollama
+[void](Download-GgufModel)
 
-$ollama = Find-Ollama
-if (-not $ollama) {
-  if (Install-With-Winget "Ollama.Ollama" "Ollama") {
-    $ollama = Find-Ollama
-  }
-}
-if (-not $ollama) {
-  Log "Ollama absent après l'installation. LOUPe démarrera en mode heuristique si nécessaire."
-  exit 0
-}
-
-Log "Ollama trouvé : $ollama"
-$apiReady = $false
-try {
-  $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
-  $apiReady = $true
-} catch {
-  Log "Démarrage du serveur Ollama."
-  Start-Process -FilePath $ollama -ArgumentList "serve" -WindowStyle Hidden | Out-Null
-  for ($i = 0; $i -lt 30; $i++) {
-    Start-Sleep -Seconds 1
-    try {
-      $null = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 2
-      $apiReady = $true
-      break
-    } catch { }
-  }
-}
-
-if (-not $apiReady) {
-  Log "API Ollama indisponible; téléchargement du modèle reporté au prochain lancement."
-  exit 0
-}
-
-$model = "qwen3:1.7b-flash"
-$hasModel = $false
-try {
-  $tags = Invoke-RestMethod -Uri "http://127.0.0.1:11434/api/tags" -TimeoutSec 5
-  $hasModel = @($tags.models | Where-Object { $_.name -eq $model }).Count -gt 0
-} catch {
-  Log "Impossible de lire les modèles Ollama : $($_.Exception.Message)"
-}
-
-if (-not $hasModel) {
-  Log "Téléchargement du modèle $model. Cette étape peut prendre quelques minutes."
-  & $ollama pull $model *>&1 | ForEach-Object { Log $_.ToString() }
-  if ($LASTEXITCODE -ne 0) { Log "Le téléchargement de $model a échoué; LOUPe pourra utiliser le fallback heuristique." }
-} else {
-  Log "Modèle $model déjà présent."
-}
-
-Log "Préparation des dépendances terminée. Aucun identifiant Gmail n'a été copié ou modifié."
+Log "Préparation des composants terminée. Aucun identifiant Gmail n'a été copié ou modifié."
 exit 0

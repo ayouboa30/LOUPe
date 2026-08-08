@@ -30,37 +30,95 @@ compagnon mathématique **MATh** et le compagnon code **CODy**.
 ## Portabilité
 
 Le moteur (`three_loop/`) est du Python asyncio pur — aucune dépendance
-plateforme. L'interface (`web/`) tourne dans [pywebview](https://pywebview.flowrl.com/),
-qui embarque WebView2 sur Windows, WebKit sur macOS et GTK/Qt sur Linux :
-`python -m three_loop` ou `python desktop_app.py` fonctionnent sur les trois.
+plateforme obligatoire. L’interface (`web/`) tourne dans
+[pywebview](https://pywebview.flowrl.com/) quand un backend GTK/Qt/WebKit est
+installé, et retombe sur le navigateur système. Le serveur HTTP/SSE, Ollama,
+les GGUF via `llama-cpp-python`, les CLI, les PDF et les fournisseurs cloud
+restent les mêmes sous Windows et Linux.
 
-Deux morceaux sont **spécifiques à Windows** et se dégradent proprement
-ailleurs (import protégé, aucun crash) :
+Les fonctions natives sont séparées par plateforme :
 
-| composant | rôle | portage Linux/macOS |
+| composant | Windows | Linux/macOS |
 |---|---|---|
-| `native_widget.py` | mascotte flottante (Win32 direct, `ctypes`) | non porté — piste : Tk `overrideredirect` ou AppKit/GTK |
-| `assistant_actions.py` | micro et OCR (WinRT) | non porté — `speech_recognition` + `pytesseract` couvriraient l'équivalent |
+| fenêtre principale | pywebview + WebView2 | pywebview + GTK/Qt, ou navigateur de secours |
+| `native_widget.py`, bulles, menu flottant | mascotte Win32 complète | désactivés proprement ; la fenêtre principale reste utilisable |
+| OCR d’images/PDF image | WinRT OCR | Tesseract optionnel sous Linux/macOS |
+| suivi oculaire | OpenCV/MediaPipe | OpenCV/MediaPipe avec backend caméra générique |
+| dictée du widget | WinRT Speech Recognition | message explicite ; port Whisper/Vosk à prévoir |
+| sélection de région/notifications natives | Win32 | non disponibles dans cette version |
 
-Sur Linux/macOS, l'app démarre, sert l'interface complète, et tous les
-backends (local, iGPU, OpenCode, cloud) fonctionnent ; seuls le personnage
-flottant et le micro/OCR manquent tant qu'ils ne sont pas portés.
+Le support Linux est donc fonctionnel pour l’application principale et les
+modèles locaux, mais il ne prétend pas encore offrir la parité du compagnon
+flottant Windows. Les modules Win32 restent isolés et ne sont jamais importés
+par le chemin Linux.
+
+## Installation Linux
+
+Sur Debian/Ubuntu, installe les bibliothèques de fenêtre et, si nécessaire,
+Tesseract :
+
+```bash
+sudo apt install python3-venv python3-tk libgtk-3-0 tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e ".[desktop,desktop-linux,web,llama]"
+python desktop_app.py
+```
+
+`pytesseract` est uniquement le pont Python : le binaire système
+`tesseract-ocr` et les langues choisies restent nécessaires. Le GGUF est
+chargé directement depuis le disque avec mmap, exactement comme sous Windows.
+Si pywebview ne trouve pas GTK/Qt, LOUPe ouvre automatiquement l’interface
+sur `http://127.0.0.1:<port>` dans le navigateur par défaut.
+
+Pour produire un bundle PyInstaller Linux :
+
+```bash
+bash build_linux.sh
+dist/3loop/3loop
+```
+
+Le script ne télécharge aucun modèle et ne tente pas d’installer de paquet
+système. Le widget flottant Win32, la capture de région et la dictée restent
+désactivés dans ce bundle ; l’OCR Tesseract fonctionne si ses paquets système
+sont présents.
 
 ## Installation Windows (LOUPe beta 0.1)
 
-Télécharge `Setup_LOUPe_beta_0.1.exe` depuis le site et lance-le. L’installateur
-copie l’application et ses bibliothèques incluses, installe WebView2, Node.js LTS
-et npm, puis prépare automatiquement les CLI **Codex**, **Claude Code** et
-**OpenCode**. Il installe aussi Ollama si nécessaire et télécharge
-`qwen3:1.7b-flash`. Une connexion Internet est nécessaire pendant cette
-préparation et le modèle peut peser plusieurs centaines de Mo. Les CLI peuvent
-ensuite demander leur propre connexion dans la fenêtre ou le terminal de
-l’utilisateur : aucune clé API ni aucun compte personnel n’est inclus.
+Télécharge `Setup_LOUPe_beta_0.1.exe` depuis le site et lance-le. L’assistant
+permet de refuser séparément WebView2, Node.js, Codex, OpenCode, Claude Code,
+Ollama, les profils Qwen3 et un éventuel modèle GGUF. Les modèles ne sont
+jamais embarqués dans l’EXE : ils sont téléchargés uniquement si l’utilisateur
+les sélectionne, dans la limite d’espace disque indiquée.
 
-Les identifiants Gmail ne sont jamais inclus dans l’installateur. Chaque personne
-configure son propre OAuth Google dans LOUPe, avec le scope strictement limité à
-`gmail.readonly`. Le suivi Python des yeux est annoncé dans l’interface comme
-**bientôt disponible** et reste désactivé dans cette bêta.
+Par défaut, l’installeur prépare Ollama et les deux poids Qwen3 nécessaires aux
+quatre niveaux de réflexion de l’interface :
+
+| niveau | profil | usage |
+|---|---|---|
+| **Flash lite** | `qwen3:1.7b-flash` | Qwen3 1.7B, réponse rapide sans raisonnement long |
+| **Flash** | `qwen3:1.7b` | Qwen3 1.7B, compromis vitesse/raisonnement |
+| **Élevé** | `qwen3:4b-flash` | Qwen3 4B, réponse directe |
+| **Très élevé** | `qwen3:4b` | Qwen3 4B, raisonnement approfondi |
+
+Les profils `*-flash` sont des Modelfiles locaux : ils réutilisent les poids
+1.7B et 4B déjà téléchargés et n’occupent pas quatre fois l’espace. Les
+Modelfiles sont inclus dans l’installeur. Les modèles Qwen3 officiels sont
+publiés sous Apache-2.0 dans leurs dépôts [GGUF Qwen3 1.7B](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF), [4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [8B](https://huggingface.co/Qwen/Qwen3-8B-GGUF), [14B](https://huggingface.co/Qwen/Qwen3-14B-GGUF) et [32B](https://huggingface.co/Qwen/Qwen3-32B-GGUF).
+
+L’option GGUF utilise directement `llama.cpp` via `llama-cpp-python`. Le fichier
+quantifié reste dans `{app}\\models` et est chargé avec mmap depuis le disque ;
+ce mécanisme évite une copie inutile des poids, mais ne supprime pas les
+besoins de RAM, de VRAM ou de cache KV. Le catalogue propose Qwen3 1.7B Q8,
+4B Q4_K_M, 8B Q4_K_M, 14B Q4_K_M et 32B Q4_K_M. Les 14B et 32B sont marqués
+GPU/RAM élevée : un fichier sur disque n’est pas une garantie qu’un ordinateur
+8 Go RAM pourra l’exécuter.
+
+Une connexion Internet est nécessaire pour les composants et modèles choisis.
+Les identifiants Gmail ne sont jamais inclus dans l’installateur. Chaque
+personne configure son propre OAuth Google dans LOUPe, avec le scope strictement
+limité à `gmail.readonly`. Le suivi Python des yeux est annoncé dans l’interface
+comme **bientôt disponible** et reste désactivé dans cette bêta.
 
 ## Application de bureau (Windows)
 
@@ -99,8 +157,9 @@ Le cœur n'a aucune dépendance obligatoire :
 python -m pip install -e ".[dev]"
 ```
 
-Extras : `desktop` (app Windows), `web` (recherche DDG), `llama`
-(llama-cpp-python), `litellm`, `airllm`.
+Extras : `desktop` (fenêtre principale multiplateforme), `desktop-windows`
+(compagnon Win32, OCR et dictée WinRT), `desktop-linux` (pont Tesseract), `web`
+(recherche DDG), `llama` (llama-cpp-python), `litellm`, `airllm`.
 
 ## Utilisation en ligne de commande
 

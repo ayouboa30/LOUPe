@@ -2,11 +2,11 @@
 
 Three things live here:
 
-- ``listen_and_transcribe``: one-shot voice capture via the modern WinRT
-  speech recognizer (``Windows.Media.SpeechRecognition``), fully offline,
-  no extra API key.
-- ``capture_and_ocr``: whole-screen screenshot read with the Windows OCR
-  engine (``Windows.Media.Ocr``), same offline, no-API-key story.
+- ``listen_and_transcribe``: one-shot voice capture via the native speech
+  recognizer on Windows; other platforms return an explicit unavailable
+  status instead of importing WinRT.
+- ``capture_and_ocr``: whole-screen screenshot read with Windows OCR or the
+  optional cross-platform Tesseract bridge, same offline, no-API-key story.
 - ``run_prompt_in_background``: fires the resulting text at the local
   3loop engine (the same HTTP+SSE endpoint the web UI uses) on a
   background thread and hands the final answer to a callback, so the
@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 import json
+import sys
 import threading
 import urllib.request
 from collections.abc import Sequence
@@ -154,14 +155,8 @@ def save_assistant_settings(*, enabled: bool, interval_minutes: int) -> None:
         pass
 
 
-def ocr_image(image: Image.Image) -> str:
-    """Read an image with Windows OCR and return its text.
-
-    ``winocr`` and the WinRT language package are optional at import time so
-    the main application can still start. They are validated here, when OCR
-    is actually requested, and the resulting error explains exactly how to
-    repair a packaged installation instead of surfacing a vague import error.
-    """
+def _ocr_image_windows(image: Image.Image) -> str:
+    """Read an image with the Windows OCR runtime."""
 
     try:
         import winocr
@@ -202,10 +197,53 @@ def ocr_image(image: Image.Image) -> str:
         ) from exc
 
 
-def capture_and_ocr() -> str:
-    """Screenshot the whole screen and read it with the Windows OCR engine."""
+def _ocr_image_tesseract(image: Image.Image) -> str:
+    """Read an image with the cross-platform Tesseract command-line engine."""
 
-    return ocr_image(ImageGrab.grab())
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError(
+            "OCR indisponible sous Linux/macOS. Installez l'extra "
+            "desktop-linux (`pip install pytesseract`) et le moteur système "
+            "Tesseract (par exemple `sudo apt install tesseract-ocr "
+            "tesseract-ocr-fra`)."
+        ) from exc
+
+    try:
+        text = pytesseract.image_to_string(image.convert("RGB"), lang="fra+eng")
+    except Exception as exc:
+        raise RuntimeError(
+            "Tesseract n'est pas disponible ou aucune langue fra+eng n'est "
+            "installee. Installez `tesseract-ocr`, `tesseract-ocr-fra` et "
+            "`tesseract-ocr-eng`, puis relancez 3loop."
+        ) from exc
+    return (text or "").strip()
+
+
+def ocr_image(image: Image.Image) -> str:
+    """Read an image with the native OCR engine available on this platform."""
+
+    if sys.platform == "win32":
+        return _ocr_image_windows(image)
+    return _ocr_image_tesseract(image)
+
+
+def capture_screen() -> Image.Image:
+    """Capture all available screens where the platform backend supports it."""
+
+    try:
+        return ImageGrab.grab(all_screens=sys.platform == "win32")
+    except TypeError:
+        # Older Pillow releases do not expose ``all_screens``. Keep the
+        # primary-screen fallback instead of breaking the whole OCR action.
+        return ImageGrab.grab()
+
+
+def capture_and_ocr() -> str:
+    """Screenshot the whole screen and read it with the platform OCR engine."""
+
+    return ocr_image(capture_screen())
 
 
 #: A full-screen OCR pass returns everything: window titles, the taskbar,
@@ -408,7 +446,14 @@ _PRIVACY_POLICY_NOT_ACCEPTED = -2147199735
 
 
 def listen_and_transcribe(timeout_seconds: float = 12.0) -> str:
-    """Blocking one-shot dictation via the WinRT speech recognizer."""
+    """Blocking one-shot dictation via the native speech stack."""
+
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "La dictee native n'est pas encore disponible sous Linux/macOS. "
+            "Utilise le champ texte de l'interface; le portage Whisper/Vosk "
+            "pourra etre ajoute sans activer de service cloud."
+        )
 
     from winrt.windows.media.speechrecognition import (
         SpeechRecognizer,
@@ -447,6 +492,8 @@ def listen_and_transcribe(timeout_seconds: float = 12.0) -> str:
 def _open_speech_privacy_settings() -> None:
     """Open Windows' speech privacy settings page, best-effort."""
 
+    if sys.platform != "win32":
+        return
     try:
         os.startfile("ms-settings:privacy-speech")  # noqa: S606 - user-facing Settings URI
     except OSError:

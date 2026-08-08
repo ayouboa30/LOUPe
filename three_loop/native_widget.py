@@ -138,12 +138,13 @@ import urllib.request
 from urllib.parse import urlsplit
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageGrab
+from PIL import Image, ImageDraw
 
 from . import notify
 from .assistant_actions import (
     build_screen_reading_prompt,
     build_screen_search_prompt,
+    capture_screen,
     listen_and_transcribe,
     load_assistant_settings,
     ocr_image,
@@ -2004,7 +2005,7 @@ class NativeWidget:
 
         if self._watcher is None:
             self._watcher = ScreenWatcher(
-                capture=ImageGrab.grab,
+                capture=capture_screen,
                 ocr=ocr_image,
                 search=search_from_text,
                 on_result=self._on_watch_result,

@@ -36,6 +36,17 @@
       <select id="model-select"></select>
     </div>
 
+    <div class="side-section" id="reflection-section" hidden>
+      <label for="reflection-select">Niveau de réflexion</label>
+      <select id="reflection-select">
+        <option value="lite">Flash lite · Qwen3 1.7B Flash</option>
+        <option value="flash">Flash · Qwen3 1.7B</option>
+        <option value="high">Élevé · Qwen3 4B Flash</option>
+        <option value="very_high">Très élevé · Qwen3 4B</option>
+      </select>
+      <p id="reflection-hint" class="hint">Les profils Qwen3 sont installés localement par l’installeur.</p>
+    </div>
+
     <div class="side-section" id="theme-section">
       <label for="kind-select">Thème</label>
       <select id="kind-select">
@@ -140,6 +151,25 @@
       <button id="side-panel-close" class="side-panel-close" type="button" aria-label="Réduire le panneau" title="Réduire">
         <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
+    </div>
+
+    <div class="panel-card platform-card">
+      <div class="platform-card-header">
+        <h4>Installation &amp; plateformes</h4>
+        <span class="platform-badge">Linux</span>
+      </div>
+      <p class="panel-hint">Le cœur local et l’interface web sont portables. Les fonctions natives Win32 restent spécifiques à Windows.</p>
+      <div class="platform-status platform-status-ready">
+        <span class="platform-status-dot" aria-hidden="true"></span>
+        <span><strong>Windows</strong> · exécutable et installeur disponibles</span>
+      </div>
+      <div class="platform-status platform-status-pending">
+        <span class="platform-status-dot" aria-hidden="true"></span>
+        <span><strong>Linux</strong> · bundle à générer sur une machine Linux</span>
+      </div>
+      <code class="platform-command">bash build_linux.sh</code>
+      <p class="panel-hint platform-note">Depuis la racine du dépôt, avec Python 3 et PyInstaller. OCR Linux optionnel : Tesseract.</p>
+      <button class="platform-download" type="button" disabled aria-disabled="true">Paquet Linux public bientôt disponible</button>
     </div>
 
     <div class="panel-card scientific-search-card">

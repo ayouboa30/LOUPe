@@ -9,6 +9,7 @@ scraped URL's content, just for a locally-picked file instead of a link.
 from __future__ import annotations
 
 import io
+import sys
 from dataclasses import dataclass
 
 from .compact import compact_text
@@ -78,7 +79,7 @@ def extract_text(name: str, data: bytes) -> str:
 
 
 def _extract_image_ocr(data: bytes) -> str:
-    """Read a screenshot attachment with the same Windows OCR path as the mascot."""
+    """Read a screenshot attachment with the platform OCR path."""
 
     try:
         from PIL import Image
@@ -89,9 +90,12 @@ def _extract_image_ocr(data: bytes) -> str:
     except ValueError:
         raise
     except Exception as exc:
+        if sys.platform == "win32":
+            hint = "installez le pack OCR Windows"
+        else:
+            hint = "installez Tesseract (`sudo apt install tesseract-ocr tesseract-ocr-fra tesseract-ocr-eng`)"
         raise ValueError(
-            "Image non supporte ou illisible: installez le pack OCR Windows "
-            "et relancez 3loop."
+            f"Image non supportee ou illisible: {hint} et relancez 3loop."
         ) from exc
 
 

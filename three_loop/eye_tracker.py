@@ -9,6 +9,7 @@ placement, calibration drift, and face detection all affect confidence.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -84,7 +85,12 @@ class EyeTrackingService:
             camera_index = int(camera_index)
             if camera_index < 0 or camera_index > 3:
                 raise ValueError("L'index caméra doit être compris entre 0 et 3.")
-            camera = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            capture_backend = getattr(cv2, "CAP_DSHOW", None) if sys.platform == "win32" else None
+            camera = (
+                cv2.VideoCapture(camera_index, capture_backend)
+                if capture_backend is not None
+                else cv2.VideoCapture(camera_index)
+            )
             if not camera.isOpened():
                 camera.release()
                 return self._set_unavailable("Caméra locale inaccessible ou déjà utilisée.")
