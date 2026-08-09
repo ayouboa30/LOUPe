@@ -23,7 +23,6 @@ own terminal. What replaces the key is detection - see ``_CLI_AGENTS`` and
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import mimetypes
 import re
@@ -53,6 +52,7 @@ from .compact import compact_text
 from .documents import extract_text as extract_document_text
 from .eye_tracker import get_eye_tracker
 from .igpu import ensure_server as ensure_igpu_server, probe as igpu_probe
+from .update_check import check_for_update
 from .gmail import (
     GMAIL_DEFAULT_QUERY,
     GMAIL_MAX_MESSAGES,
@@ -1077,9 +1077,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib method name
         request_path = urlparse(self.path).path
-        if request_path == "/api/v1/gmail/oauth/callback":
-            self._handle_v1_gmail_callback()
-            return
         if request_path.startswith("/api/v1/"):
             self._handle_v1_get(request_path)
             return
@@ -1123,8 +1120,6 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_v1_theme()
         elif request_path == "/api/v1/gmail/configure":
             self._handle_v1_gmail_configure()
-        elif request_path == "/api/v1/gmail/connect":
-            self._handle_v1_gmail_connect()
         elif request_path == "/api/v1/gmail/analyze":
             self._handle_v1_gmail_analyze()
         elif request_path == "/api/v1/feedback":
@@ -1225,70 +1220,25 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
-    def _gmail_redirect_uri(self) -> str:
-        port = int(self.server.server_address[1])
-        return f"http://127.0.0.1:{port}/api/v1/gmail/oauth/callback"
-
     def _handle_v1_gmail_configure(self) -> None:
-        """Save OAuth credentials supplied by the local Gmail form."""
+        """Validate and save the address + app password from the local Gmail form."""
 
         payload = self._read_json_payload(max_bytes=16_000)
         if payload is None:
             return
         try:
-            result = _GMAIL_CLIENT.configure_client(
-                str(payload.get("client_id", "")),
-                str(payload.get("client_secret", "")),
+            result = _GMAIL_CLIENT.configure(
+                str(payload.get("email", "")),
+                str(payload.get("app_password", "")),
             )
         except GmailConfigurationError as exc:
             self._send_json({"error": str(exc)}, status=422)
             return
-        # Never echo client_secret, even to the local browser.
+        except GmailAuthError as exc:
+            self._send_json({"error": str(exc)}, status=401)
+            return
+        # Never echo the app password back, even to the local browser.
         self._send_json(result, status=201)
-
-    def _handle_v1_gmail_connect(self) -> None:
-        """Start the loopback OAuth flow without returning any credentials."""
-
-        try:
-            auth_url = _GMAIL_CLIENT.begin_authorization(self._gmail_redirect_uri())
-        except GmailConfigurationError as exc:
-            self._send_json({"error": str(exc), "configured": False}, status=409)
-            return
-        self._send_json({"authorization_url": auth_url, "scope": "gmail.readonly"})
-
-    def _handle_v1_gmail_callback(self) -> None:
-        """Consume Google's redirect and show a tiny local success page."""
-
-        query = parse_qs(urlparse(self.path).query)
-        error = (query.get("error") or [""])[0]
-        if error:
-            description = (query.get("error_description") or [error])[0]
-            self._send_html(
-                "Connexion Gmail annulée",
-                f"<h1>Connexion Gmail annulée</h1><p>{html.escape(description)}</p>"
-                "<p>Tu peux fermer cet onglet et revenir à 3loop.</p>",
-                status=400,
-            )
-            return
-        try:
-            _GMAIL_CLIENT.complete_authorization(
-                code=(query.get("code") or [""])[0],
-                state=(query.get("state") or [""])[0],
-                redirect_uri=self._gmail_redirect_uri(),
-            )
-            email = _GMAIL_CLIENT.profile_email()
-            self._send_html(
-                "Gmail connecté",
-                "<h1>Gmail connecté</h1>"
-                f"<p>{html.escape(email or 'Compte autorisé')}</p>"
-                "<p>Tu peux fermer cet onglet et revenir à 3loop.</p>",
-            )
-        except (GmailAuthError, GmailConfigurationError, GmailError) as exc:
-            self._send_html(
-                "Connexion Gmail impossible",
-                f"<h1>Connexion Gmail impossible</h1><p>{html.escape(str(exc))}</p>",
-                status=400,
-            )
 
     def _handle_v1_gmail_analyze(self) -> None:
         """Read recent Gmail messages and return concise summaries/categories."""
@@ -1473,6 +1423,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if request_path == "/api/v1/gmail/status":
             self._send_json(_GMAIL_CLIENT.status())
+            return
+        if request_path == "/api/v1/update-check":
+            # One unauthenticated GET to GitHub's public releases API, no
+            # user data involved - see update_check.py for why this can
+            # never raise or block the rest of the app.
+            self._send_json(check_for_update())
             return
         try:
             workspace = get_workspace()
@@ -2249,20 +2205,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
-    def _send_html(self, title: str, body: str, *, status: int = 200) -> None:
-        document = (
-            "<!doctype html><html lang='fr'><head><meta charset='utf-8'>"
-            f"<title>{html.escape(title)}</title>"
-            "<style>body{font:16px system-ui;max-width:680px;margin:12vh auto;padding:24px;"
-            "color:#202124}h1{font-size:24px}</style></head>"
-            f"<body>{body}</body></html>"
-        ).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(document)))
-        self.end_headers()
-        self.wfile.write(document)
 
     def _send_text(self, body: str, *, content_type: str = "text/plain", filename: str = "export.txt") -> None:
         encoded = body.encode("utf-8")

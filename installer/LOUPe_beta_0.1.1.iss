@@ -1,28 +1,28 @@
 [Setup]
 AppId={{B3A1B3E0-0F1C-4D36-9D7C-3A5D2E0B1001}
-AppName=LOUPe beta 0.1
-AppVersion=0.1.0
+AppName=LOUPe beta 0.1.1
+AppVersion=0.1.1
 AppPublisher=LOUPe
 AppPublisherURL=https://www.ayoubouladali.com
 AppSupportURL=https://github.com/ayouboa30/LOUPe/issues
 AppUpdatesURL=https://www.ayoubouladali.com/projects.html#loupe-beta
-DefaultDirName={localappdata}\LOUPe\beta-0.1
-DefaultGroupName=LOUPe beta 0.1
+DefaultDirName={localappdata}\LOUPe\beta-0.1.1
+DefaultGroupName=LOUPe beta 0.1.1
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\release
-OutputBaseFilename=Setup_LOUPe_beta_0.1
+OutputBaseFilename=Setup_LOUPe_beta_0.1.1
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayName=LOUPe beta 0.1
+UninstallDisplayName=LOUPe beta 0.1.1
 UninstallDisplayIcon={app}\app\3loop.exe
 SetupIconFile=..\web\assets\pixel_researcher.ico
-VersionInfoDescription=LOUPe beta 0.1
-VersionInfoProductName=LOUPe beta 0.1
-VersionInfoProductVersion=0.1.0.0
+VersionInfoDescription=LOUPe beta 0.1.1
+VersionInfoProductName=LOUPe beta 0.1.1
+VersionInfoProductVersion=0.1.1.0
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
@@ -40,12 +40,12 @@ Source: "..\.qwen3-4b-flash.Modelfile"; DestDir: "{app}"; Flags: ignoreversion
 Name: "{app}\models"
 
 [Icons]
-Name: "{autoprograms}\LOUPe beta 0.1"; Filename: "{app}\app\3loop.exe"; WorkingDir: "{app}\app"; Comment: "LOUPe beta 0.1"
-Name: "{autodesktop}\LOUPe beta 0.1"; Filename: "{app}\app\3loop.exe"; WorkingDir: "{app}\app"; Tasks: desktopicon; Comment: "LOUPe beta 0.1"
+Name: "{autoprograms}\LOUPe beta 0.1.1"; Filename: "{app}\app\3loop.exe"; WorkingDir: "{app}\app"; Comment: "LOUPe beta 0.1.1"
+Name: "{autodesktop}\LOUPe beta 0.1.1"; Filename: "{app}\app\3loop.exe"; WorkingDir: "{app}\app"; Tasks: desktopicon; Comment: "LOUPe beta 0.1.1"
 
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Setup-Ollama.ps1"" -InstallWebView2 ""{code:GetInstallWebView2}"" -InstallNode ""{code:GetInstallNode}"" -InstallCodex ""{code:GetInstallCodex}"" -InstallOpenCode ""{code:GetInstallOpenCode}"" -InstallClaudeCode ""{code:GetInstallClaudeCode}"" -InstallOllama ""{code:GetInstallOllama}"" -InstallQwenProfiles ""{code:GetInstallQwenProfiles}"" -GgufUrl ""{code:GetGgufUrl}"" -GgufFileName ""{code:GetGgufFileName}"" -GgufSizeBytes ""{code:GetGgufSizeBytes}"" -ModelsDirectory ""{app}\models"""; StatusMsg: "Préparation des composants et modèles sélectionnés..."; Flags: waituntilterminated
-Filename: "{app}\app\3loop.exe"; Description: "Lancer LOUPe beta 0.1"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\app\3loop.exe"; Description: "Lancer LOUPe beta 0.1.1"; Flags: nowait postinstall skipifsilent
 
 [Code]
 const

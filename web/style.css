@@ -313,41 +313,6 @@ select option {
 }
 .switch-row input { accent-color: var(--accent); }
 
-details.advanced {
-  border-top: 1px solid var(--border-soft);
-  padding-top: 12px;
-  margin-top: 2px;
-}
-details.advanced summary {
-  cursor: pointer;
-  font-size: 12px;
-  color: var(--text-dim);
-  font-weight: 600;
-  list-style: none;
-}
-details.advanced summary::-webkit-details-marker { display: none; }
-details.advanced summary::before {
-  content: "›";
-  display: inline-block;
-  margin-right: 6px;
-  transition: transform 0.15s ease;
-}
-details.advanced[open] summary::before { transform: rotate(90deg); }
-details.advanced label {
-  display: block;
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--text-faint);
-  font-weight: 500;
-  text-transform: none;
-}
-details.advanced input[type="range"] {
-  width: 100%;
-  accent-color: var(--accent);
-  margin-top: 4px;
-}
-details.advanced select { margin-top: 4px; }
-
 /* ---------- Chat ---------- */
 
 .chat {
@@ -579,6 +544,43 @@ details.advanced select { margin-top: 4px; }
 .status-pill.ok { color: var(--ok); border-color: rgba(110,231,183,0.35); background: rgba(110,231,183,0.08); box-shadow: 0 0 12px rgba(110,231,183,0.25); }
 .status-pill.warn { color: var(--warn); border-color: rgba(251,191,140,0.35); background: rgba(251,191,140,0.08); }
 
+/* Update banner: informational only, never blocks the UI. Dismissing it is
+   remembered per-version (app.js), so it only reappears for a genuinely
+   newer release rather than nagging on every reload. */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  margin-bottom: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(251,191,140,0.35);
+  background: rgba(251,191,140,0.08);
+  color: var(--warn);
+  font-size: 12px;
+  animation: pill-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.update-banner span { flex: 1; line-height: 1.35; }
+.update-banner__link {
+  flex-shrink: 0;
+  color: var(--warn);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.update-banner__dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--warn);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+  opacity: 0.7;
+}
+.update-banner__dismiss:hover { opacity: 1; }
+
 .thinking {
   display: flex;
   align-items: center;
@@ -586,36 +588,6 @@ details.advanced select { margin-top: 4px; }
   color: var(--text-faint);
   font-size: 13px;
 }
-.orbit {
-  position: relative;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  animation: orbit-spin 1.6s linear infinite;
-}
-.orbit .agent {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  margin: -3px 0 0 -3px;
-  animation: agent-pulse 1.6s ease-in-out infinite;
-  box-shadow: 0 0 6px currentColor;
-}
-.orbit .agent.a1 { background: var(--heuristic); color: var(--heuristic); transform: rotate(0deg) translateX(9px); }
-.orbit .agent.a2 { background: var(--critic); color: var(--critic); transform: rotate(120deg) translateX(9px); animation-delay: 0.18s; }
-.orbit .agent.a3 { background: var(--writer); color: var(--writer); transform: rotate(240deg) translateX(9px); animation-delay: 0.36s; }
-@keyframes orbit-spin { to { transform: rotate(360deg); } }
-@keyframes agent-pulse { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
-
-/* Same orbiting-agents motif on the mascot's avatar while it is "thinking" */
-.msg-avatar.thinking-avatar .mascot { opacity: 0.35; }
-/* Inset follows the avatar box: (32 - 22) / 2 = 5px keeps the 22px orbit
-   centred. It was 4px back when the box measured 30px. */
-.msg-avatar.thinking-avatar .orbit { position: absolute; top: 5px; left: 5px; width: 22px; height: 22px; }
-
 .composer {
   position: relative;
   display: flex;
@@ -1187,13 +1159,8 @@ select option {
   color: var(--text-dim);
 }
 
-.switch-row input,
-details.advanced input[type="range"] {
+.switch-row input {
   accent-color: var(--accent);
-}
-
-details.advanced {
-  border-color: var(--border-soft);
 }
 
 .messages {
@@ -2603,8 +2570,7 @@ body {
 
 .brand,
 .side-section,
-.background-research,
-.advanced {
+.background-research {
   position: relative;
   z-index: 1;
 }
@@ -2643,8 +2609,7 @@ body {
 }
 
 .side-section > label,
-.background-research-label,
-.advanced > summary {
+.background-research-label {
   color: #4a4860;
   font-family: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
   font-size: 10px;

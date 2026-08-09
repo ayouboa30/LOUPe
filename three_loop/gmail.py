@@ -1,51 +1,47 @@
-"""Small, read-only Gmail API client used by the local 3loop server.
+"""Small, read-only Gmail client used by the local 3loop server.
 
-The project deliberately does not make Google's client libraries mandatory:
-the desktop bundle remains dependency-free and OAuth is implemented with the
-standard library. A Google OAuth desktop client can be supplied through
-``THREELOOP_GMAIL_CLIENT_ID``/``THREELOOP_GMAIL_CLIENT_SECRET`` or through
-``~/.3loop/gmail_client.json``. Tokens never cross into the browser.
+Uses IMAP with a Google "app password" instead of OAuth: OAuth would require
+each user to create their own Google Cloud project and register a desktop
+client before they could connect anything, which is far too much friction
+for a beta tool. An app password is two clicks in Gmail's own settings
+(IMAP must be enabled, and 2-step verification turned on to generate one)
+and never leaves this machine - it is stored locally next to the app's other
+local-only config, the same trust model the previous OAuth token already had.
+
+Every fetch uses ``BODY.PEEK[]`` rather than plain ``FETCH ... RFC822`` so
+reading a message never marks it as seen in the user's real inbox, matching
+the "read-only" promise made in the UI.
 """
 
 from __future__ import annotations
 
-import base64
-import html
+import email as email_lib
+import imaplib
 import json
-import os
-import secrets
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from email.header import decode_header, make_header
+from email.message import Message
 from email.utils import parsedate_to_datetime, parseaddr
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Callable
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from typing import Any
 
-GMAIL_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+IMAP_HOST = "imap.gmail.com"
+IMAP_PORT = 993
 GMAIL_DEFAULT_QUERY = "in:anywhere -label:SPAM -category:promotions newer_than:1d"
 GMAIL_MAX_MESSAGES = 25
-_GMAIL_DETAIL_WORKERS = 6
-_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
-_TOKEN_URL = "https://oauth2.googleapis.com/token"
-_GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
-_STATE_TTL = 600.0
 
 
 class GmailError(RuntimeError):
-    """Base error for configuration, OAuth, and Gmail API failures."""
+    """Base error for configuration and IMAP failures."""
 
 
 class GmailConfigurationError(GmailError):
-    """The user has not supplied a Google OAuth client configuration."""
+    """No Gmail address/app password has been saved yet."""
 
 
 class GmailAuthError(GmailError):
-    """OAuth credentials are missing, invalid, or expired."""
+    """The IMAP server rejected the stored address/app password."""
 
 
 @dataclass(frozen=True)
@@ -107,14 +103,6 @@ def _decode_header(value: str) -> str:
         return value
 
 
-def _decode_body(data: str) -> str:
-    try:
-        raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-        return raw.decode("utf-8", errors="replace")
-    except (ValueError, TypeError):
-        return ""
-
-
 def _html_to_text(value: str) -> str:
     parser = _HTMLText()
     try:
@@ -122,7 +110,7 @@ def _html_to_text(value: str) -> str:
         parser.close()
         value = "".join(parser.parts)
     except Exception:
-        value = html.unescape(value)
+        value = value
     return value
 
 
@@ -132,201 +120,96 @@ def _clean_text(value: str, *, limit: int = 20_000) -> str:
     return cleaned[:limit]
 
 
-def _payload_text(payload: dict[str, Any]) -> tuple[str, str]:
+def _payload_text(parsed: Message) -> tuple[str, str]:
     """Return the preferred plain-text body and an HTML fallback."""
 
     plain: list[str] = []
     rich: list[str] = []
-
-    def walk(part: dict[str, Any]) -> None:
-        mime = str(part.get("mimeType", "")).lower()
-        body = part.get("body") or {}
-        data = body.get("data") if isinstance(body, dict) else None
-        if data:
-            decoded = _decode_body(str(data))
-            if mime == "text/plain":
-                plain.append(decoded)
-            elif mime == "text/html":
-                rich.append(decoded)
-        for child in part.get("parts") or []:
-            if isinstance(child, dict):
-                walk(child)
-
-    walk(payload)
+    parts = parsed.walk() if parsed.is_multipart() else [parsed]
+    for part in parts:
+        if part.is_multipart():
+            continue
+        content_type = part.get_content_type()
+        if content_type not in ("text/plain", "text/html"):
+            continue
+        if "attachment" in str(part.get("Content-Disposition", "")).lower():
+            continue
+        try:
+            raw = part.get_payload(decode=True) or b""
+            charset = part.get_content_charset() or "utf-8"
+            text = raw.decode(charset, errors="replace")
+        except (LookupError, ValueError):
+            text = ""
+        (plain if content_type == "text/plain" else rich).append(text)
     return _clean_text("\n".join(plain)), _clean_text(_html_to_text("\n".join(rich)))
 
 
-def _header_map(payload: dict[str, Any]) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for item in payload.get("headers") or []:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name", "")).lower()
-        if name and name not in result:
-            result[name] = _decode_header(str(item.get("value", "")))
-    return result
-
-
-def _message_from_api(raw: dict[str, Any]) -> GmailMessage:
-    payload = raw.get("payload") or {}
-    headers = _header_map(payload)
-    sender_name, sender_email = parseaddr(headers.get("from", ""))
-    date_value = headers.get("date", "")
+def _message_from_email(uid: str, parsed: Message) -> GmailMessage:
+    sender_name, sender_email = parseaddr(_decode_header(parsed.get("From", "")))
+    date_value = parsed.get("Date", "")
     try:
         date_value = parsedate_to_datetime(date_value).isoformat()
     except (TypeError, ValueError, OverflowError):
         pass
-    plain, rich = _payload_text(payload)
-    body = plain or rich or str(raw.get("snippet", ""))
+    plain, rich = _payload_text(parsed)
+    snippet = _clean_text(plain or rich, limit=600)
     return GmailMessage(
-        id=str(raw.get("id", "")),
-        thread_id=str(raw.get("threadId", "")),
+        id=uid,
+        thread_id="",
         sender_name=sender_name.strip(),
         sender_email=sender_email.strip(),
-        subject=headers.get("subject", "").strip(),
-        date=date_value.strip(),
-        snippet=_clean_text(str(raw.get("snippet", "")), limit=600),
-        body=body,
-        labels=tuple(str(value) for value in raw.get("labelIds") or []),
+        subject=_decode_header(str(parsed.get("Subject", ""))).strip(),
+        date=str(date_value).strip(),
+        snippet=snippet,
+        body=plain or rich or snippet,
+        labels=(),
     )
 
 
-def _client_config() -> tuple[str, str, str]:
-    client_id = os.environ.get("THREELOOP_GMAIL_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("THREELOOP_GMAIL_CLIENT_SECRET", "").strip()
-    source = "variables d'environnement"
-    path = Path.home() / ".3loop" / "gmail_client.json"
-    if not client_id and path.is_file():
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            value = value.get("installed", value.get("web", value)) if isinstance(value, dict) else {}
-            client_id = str(value.get("client_id", "")).strip()
-            client_secret = str(value.get("client_secret", "")).strip()
-            source = str(path)
-        except (OSError, json.JSONDecodeError, AttributeError):
-            pass
-    return client_id, client_secret, source
-
-
-_PENDING_STATES: dict[str, tuple[float, str]] = {}
-_PENDING_STATES_LOCK = threading.Lock()
+def _credentials_path() -> Path:
+    return Path.home() / ".3loop" / "gmail_imap.json"
 
 
 class GmailClient:
-    """OAuth and Gmail REST client restricted to ``gmail.readonly``."""
+    """Read-only Gmail access over IMAP, authenticated with an app password."""
 
-    def __init__(
-        self,
-        *,
-        token_path: Path | None = None,
-        opener: Callable[..., Any] = urlopen,
-    ) -> None:
-        self.token_path = token_path or (Path.home() / ".3loop" / "gmail_token.json")
-        self._opener = opener
-
-    @property
-    def client_configured(self) -> bool:
-        return bool(_client_config()[0])
+    def __init__(self, *, credentials_path: Path | None = None) -> None:
+        self.credentials_path = credentials_path or _credentials_path()
 
     def status(self) -> dict[str, Any]:
-        client_id, _secret, source = _client_config()
-        token = self._read_token()
-        connected = bool(token and (token.get("refresh_token") or token.get("access_token")))
+        creds = self._read_credentials()
+        configured = bool(creds and creds.get("email") and creds.get("app_password"))
         return {
-            "configured": bool(client_id),
-            "connected": connected,
-            "email": str(token.get("email", "")) if token else "",
-            "scope": GMAIL_SCOPE,
-            "config_source": source if client_id else "",
-            "config_path": str(Path.home() / ".3loop" / "gmail_client.json"),
+            "configured": configured,
+            "connected": configured,
+            "email": str(creds.get("email", "")) if creds else "",
+            "config_path": str(self.credentials_path),
         }
 
-    def configure_client(self, client_id: str, client_secret: str = "") -> dict[str, Any]:
-        """Persist OAuth client credentials entered in the local UI.
+    def configure(self, email_address: str, app_password: str) -> dict[str, Any]:
+        """Validate and persist an address + app password.
 
-        The secret is written only to the backend's local config file and is
-        never returned. Changing the OAuth client invalidates the old Gmail
-        token so it cannot accidentally be reused with another client.
+        Logging in immediately, rather than only on the next read, means a
+        typo in the password is reported right where the user typed it.
         """
 
-        normalized_id = str(client_id or "").strip()
-        normalized_secret = str(client_secret or "").strip()
-        if not normalized_id:
-            raise GmailConfigurationError("Le Client ID Google est obligatoire.")
-        if len(normalized_id) > 512 or len(normalized_secret) > 2048:
-            raise GmailConfigurationError("Les identifiants OAuth sont trop longs.")
-        old_id, old_secret, _source = _client_config()
-        path = Path.home() / ".3loop" / "gmail_client.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        value = {
-            "installed": {
-                "client_id": normalized_id,
-                "client_secret": normalized_secret,
-            }
-        }
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(path)
-        if old_id and (old_id != normalized_id or old_secret != normalized_secret):
-            try:
-                self.token_path.unlink()
-            except FileNotFoundError:
-                pass
-        return {"configured": True, "config_path": str(path)}
-
-    def begin_authorization(self, redirect_uri: str) -> str:
-        client_id, _secret, _source = _client_config()
-        if not client_id:
-            raise GmailConfigurationError(
-                "Configure un client OAuth Google de type application de bureau dans "
-                "~/.3loop/gmail_client.json ou avec THREELOOP_GMAIL_CLIENT_ID."
-            )
-        state = secrets.token_urlsafe(32)
-        with _PENDING_STATES_LOCK:
-            now = time.time()
-            for key, (created, _redirect) in list(_PENDING_STATES.items()):
-                if now - created > _STATE_TTL:
-                    _PENDING_STATES.pop(key, None)
-            _PENDING_STATES[state] = (now, redirect_uri)
-        params = {
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": GMAIL_SCOPE,
-            "access_type": "offline",
-            "state": state,
-        }
-        # Ask for consent only on the first authorization. Reusing a saved
-        # refresh token must not present the consent screen on every manual
-        # reconnect, while offline access still guarantees persistence.
-        saved_token = self._read_token()
-        if not saved_token or not saved_token.get("refresh_token"):
-            params["prompt"] = "consent"
-        return f"{_AUTHORIZE_URL}?{urlencode(params)}"
-
-    def complete_authorization(self, *, code: str, state: str, redirect_uri: str) -> None:
-        if not code or not state:
-            raise GmailAuthError("Retour OAuth Gmail incomplet.")
-        with _PENDING_STATES_LOCK:
-            pending = _PENDING_STATES.pop(state, None)
-        if pending is None or time.time() - pending[0] > _STATE_TTL or pending[1] != redirect_uri:
-            raise GmailAuthError("État OAuth Gmail invalide ou expiré.")
-        client_id, client_secret, _source = _client_config()
-        if not client_id:
-            raise GmailConfigurationError("Configuration OAuth Gmail absente.")
-        form = {
-            "code": code,
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        }
-        if client_secret:
-            form["client_secret"] = client_secret
-        token = self._post_form(_TOKEN_URL, form)
-        if not token.get("access_token"):
-            raise GmailAuthError("Google n'a pas renvoyé de jeton d'accès.")
-        token["expires_at"] = time.time() + max(0, int(token.get("expires_in", 3600)))
-        self._write_token(token)
+        normalized_email = str(email_address or "").strip()
+        normalized_password = str(app_password or "").replace(" ", "").strip()
+        if "@" not in normalized_email:
+            raise GmailConfigurationError("Adresse Gmail invalide.")
+        if not normalized_password:
+            raise GmailConfigurationError("Le mot de passe d'application est obligatoire.")
+        connection = self._login(normalized_email, normalized_password)
+        try:
+            connection.logout()
+        except imaplib.IMAP4.error:
+            pass
+        self.credentials_path.parent.mkdir(parents=True, exist_ok=True)
+        value = {"email": normalized_email, "app_password": normalized_password}
+        temporary = self.credentials_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(self.credentials_path)
+        return {"configured": True, "connected": True, "email": normalized_email}
 
     def list_messages(
         self,
@@ -334,123 +217,79 @@ class GmailClient:
         query: str = GMAIL_DEFAULT_QUERY,
         limit: int = GMAIL_MAX_MESSAGES,
     ) -> list[GmailMessage]:
-        token = self._access_token()
         safe_limit = max(1, min(GMAIL_MAX_MESSAGES, int(limit)))
-        data = self._api_json(
-            "/messages",
-            token,
-            params={"maxResults": str(safe_limit), "q": query[:500]},
-        )
-        message_ids = [
-            str(item.get("id", ""))
-            for item in data.get("messages") or []
-            if isinstance(item, dict) and item.get("id")
-        ]
-        if not message_ids:
-            return []
-
-        def load_message(message_id: str) -> GmailMessage | None:
+        creds = self._read_credentials()
+        if not creds or not creds.get("email") or not creds.get("app_password"):
+            raise GmailConfigurationError("Connecte d'abord un compte Gmail (adresse + mot de passe d'application).")
+        connection = self._login(str(creds["email"]), str(creds["app_password"]))
+        try:
+            status, _data = connection.select("INBOX", readonly=True)
+            if status != "OK":
+                raise GmailError("Impossible d'ouvrir la boîte de réception Gmail.")
+            # X-GM-RAW is a Gmail-only IMAP extension accepting the exact
+            # syntax as the Gmail search box, so the previous REST client's
+            # query (date + category filtering included) still works as-is.
+            status, data = connection.uid("SEARCH", None, "X-GM-RAW", f'"{query}"')
+            if status != "OK":
+                raise GmailError("Recherche Gmail impossible.")
+            uids = data[0].split() if data and data[0] else []
+            uids = uids[-safe_limit:]
+            messages: list[GmailMessage] = []
+            for uid in reversed(uids):
+                message = self._fetch_message(connection, uid)
+                if message is not None:
+                    messages.append(message)
+            return messages
+        finally:
             try:
-                raw = self._api_json(f"/messages/{message_id}", token, params={"format": "full"})
-                return _message_from_api(raw)
-            except GmailError:
-                # Keep one problematic message from blocking the daily digest.
+                connection.close()
+            except imaplib.IMAP4.error:
+                pass
+            try:
+                connection.logout()
+            except imaplib.IMAP4.error:
+                pass
+
+    def _fetch_message(self, connection: imaplib.IMAP4_SSL, uid: bytes) -> GmailMessage | None:
+        try:
+            status, data = connection.uid("FETCH", uid, "(BODY.PEEK[])")
+            if status != "OK" or not data or not isinstance(data[0], tuple):
                 return None
-
-        # Gmail returns one lightweight list response followed by one detail
-        # response per message. Fetch details in a small bounded pool: enough
-        # to remove the 25-request serial network delay without hammering the
-        # API or creating an unbounded thread count.
-        workers = min(_GMAIL_DETAIL_WORKERS, len(message_ids))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gmail") as pool:
-            return [message for message in pool.map(load_message, message_ids) if message is not None]
-
-    def profile_email(self) -> str:
-        token = self._access_token()
-        profile = self._api_json("/profile", token)
-        email = str(profile.get("emailAddress", "")).strip()
-        if email:
-            saved = self._read_token() or {}
-            saved["email"] = email
-            self._write_token(saved)
-        return email
-
-    def _access_token(self) -> str:
-        token = self._read_token()
-        if not token:
-            raise GmailAuthError("Connecte d'abord un compte Gmail.")
-        if token.get("access_token") and float(token.get("expires_at", 0)) > time.time() + 30:
-            return str(token["access_token"])
-        refresh = str(token.get("refresh_token", ""))
-        if not refresh:
-            raise GmailAuthError("Le jeton Gmail a expiré. Reconnecte le compte.")
-        client_id, client_secret, _source = _client_config()
-        form = {"client_id": client_id, "refresh_token": refresh, "grant_type": "refresh_token"}
-        if client_secret:
-            form["client_secret"] = client_secret
-        refreshed = self._post_form(_TOKEN_URL, form)
-        token.update(refreshed)
-        token["refresh_token"] = refresh
-        token["expires_at"] = time.time() + max(0, int(refreshed.get("expires_in", 3600)))
-        self._write_token(token)
-        return str(token.get("access_token", ""))
-
-    def _api_json(self, path: str, access_token: str, *, params: dict[str, str] | None = None) -> dict[str, Any]:
-        query = f"?{urlencode(params)}" if params else ""
-        request = Request(
-            f"{_GMAIL_API}{path}{query}",
-            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
-        )
+            raw = data[0][1]
+        except imaplib.IMAP4.error:
+            return None
+        parsed = email_lib.message_from_bytes(raw)
         try:
-            with self._opener(request, timeout=20) as response:
-                value = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            detail = getattr(exc, "reason", None) or str(exc)
-            raise GmailError(f"API Gmail indisponible : {detail}") from exc
-        if not isinstance(value, dict):
-            raise GmailError("Réponse Gmail invalide.")
-        if value.get("error"):
-            raise GmailError(str(value["error"]))
-        return value
+            return _message_from_email(uid.decode("ascii", errors="ignore"), parsed)
+        except Exception:
+            # One malformed message must not block the whole digest.
+            return None
 
-    def _post_form(self, url: str, values: dict[str, str]) -> dict[str, Any]:
-        request = Request(
-            url,
-            data=urlencode(values).encode("utf-8"),
-            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-            method="POST",
-        )
+    def _login(self, email_address: str, app_password: str) -> imaplib.IMAP4_SSL:
         try:
-            with self._opener(request, timeout=20) as response:
-                value = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            detail = getattr(exc, "reason", None) or str(exc)
-            raise GmailAuthError(f"OAuth Gmail indisponible : {detail}") from exc
-        if not isinstance(value, dict) or value.get("error"):
-            detail = value.get("error_description") or value.get("error") if isinstance(value, dict) else "réponse invalide"
-            raise GmailAuthError(f"OAuth Gmail refusé : {detail}")
-        return value
+            connection = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=20)
+        except OSError as exc:
+            raise GmailAuthError(f"IMAP Gmail indisponible : {exc}") from exc
+        try:
+            connection.login(email_address, app_password)
+        except imaplib.IMAP4.error as exc:
+            raise GmailAuthError(
+                "Connexion IMAP refusée. Vérifie l’adresse et le mot de passe d’application "
+                "(IMAP doit être activé dans les paramètres Gmail, sous Transfert et POP/IMAP)."
+            ) from exc
+        return connection
 
-    def _read_token(self) -> dict[str, Any] | None:
+    def _read_credentials(self) -> dict[str, Any] | None:
         try:
-            value = json.loads(self.token_path.read_text(encoding="utf-8"))
+            value = json.loads(self.credentials_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
         return value if isinstance(value, dict) else None
-
-    def _write_token(self, token: dict[str, Any]) -> None:
-        self.token_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.token_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(token, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(self.token_path)
 
 
 def fallback_classification(message: GmailMessage) -> str:
     """Classify safely into the three Gmail categories without a model."""
 
-    labels = set(message.labels)
-    if "CATEGORY_PROMOTIONS" in labels:
-        return "publicité"
     text = f"{message.subject} {message.body} {message.sender_email}".casefold()
     advertising_terms = (
         "promotion", "promotions", "promo", "soldes", "réduction", "reduction",

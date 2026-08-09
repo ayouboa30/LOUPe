@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>LOUPe beta 0.1</title>
+<title>LOUPe beta 0.1.1</title>
 <link rel="icon" href="assets/pixel_researcher_icon.png" />
 <link rel="stylesheet" href="style.css" />
 <link rel="stylesheet" href="vendor/katex/katex.min.css" />
@@ -15,7 +15,13 @@
     <div class="brand">
       <span id="brand-badge" class="brand-badge"></span>
       <span class="brand-name">LOUPe</span>
-      <span class="beta-badge">beta 0.1</span>
+      <span class="beta-badge">beta 0.1.1</span>
+    </div>
+
+    <div id="update-banner" class="update-banner" hidden>
+      <span id="update-banner-text"></span>
+      <a id="update-banner-link" class="update-banner__link" href="#" target="_blank" rel="noreferrer">Télécharger</a>
+      <button id="update-banner-dismiss" class="update-banner__dismiss" type="button" aria-label="Ignorer">×</button>
     </div>
 
     <button id="new-chat" class="btn-new-chat">+ Nouvelle conversation</button>
@@ -107,13 +113,6 @@
       <p id="research-status" class="research-status">Le petit compagnon peut chercher pendant que tu travailles.</p>
     </div>
 
-    <details class="side-section advanced">
-      <summary>Paramètres avancés</summary>
-      <label>Cycles maximum <span id="cycles-value">2</span></label>
-      <input id="cycles-range" type="range" min="1" max="8" value="2" />
-      <label>Longueur max (tokens) <span id="tokens-value">256</span></label>
-      <input id="tokens-range" type="range" min="64" max="4096" step="64" value="256" />
-    </details>
   </aside>
 
   <main class="chat">
@@ -121,7 +120,7 @@
       <div class="empty-state">
         <div id="empty-badge" class="empty-badge"></div>
         <h1>LOUPe</h1>
-        <p>Heuristique → Critique → Rédacteur → Vote de consensus.<br/>Pose une question de code, de maths, ou une recherche.</p>
+        <p>Pose une question de code, de maths, ou lance une recherche.</p>
       </div>
     </div>
 
@@ -130,6 +129,11 @@
         <input id="thinking-toggle" type="checkbox" aria-label="Activer le raisonnement approfondi" />
         <span class="composer-thinking-switch" aria-hidden="true"></span>
         <span>Thinking</span>
+      </label>
+      <label id="cycles-control" class="composer-thinking-control" title="Plusieurs cycles de débat entre les agents pour une réponse plus approfondie">
+        <input id="cycles-toggle" type="checkbox" aria-label="Activer plusieurs cycles de débat" />
+        <span class="composer-thinking-switch" aria-hidden="true"></span>
+        <span>Cycles</span>
       </label>
       <textarea id="prompt-input" rows="1" placeholder="Écris ton message…"></textarea>
       <button id="send-btn" type="submit" aria-label="Envoyer">
@@ -170,7 +174,7 @@
       <code class="platform-command">bash build_linux.sh</code>
       <p class="panel-hint platform-note">Les téléchargements passent par GitHub Releases. Le bundle Linux inclut l’interface et le moteur local ; Tesseract reste optionnel pour l’OCR.</p>
       <div class="platform-downloads">
-        <a class="platform-download platform-download-windows" href="https://github.com/ayouboa30/LOUPe/releases/download/beta-0.1/Setup_LOUPe_beta_0.1.exe" target="_blank" rel="noopener">Installer Windows (.exe)</a>
+        <a class="platform-download platform-download-windows" href="https://github.com/ayouboa30/LOUPe/releases/download/beta-0.1.1/Setup_LOUPe_beta_0.1.1.exe" target="_blank" rel="noopener">Installer Windows (.exe)</a>
         <a class="platform-download platform-download-linux" href="https://github.com/ayouboa30/LOUPe/releases/download/beta-0.1/LOUPe-linux-x86_64.tar.gz" target="_blank" rel="noopener">Installer Linux (.tar.gz)</a>
       </div>
     </div>
@@ -190,27 +194,25 @@
       <h4>Lecture Gmail</h4>
       <p class="panel-hint">Lecture seule : résumé quotidien des emails reçus pendant les dernières 24 heures, jusqu’à 25 messages, hors Promotions. Expéditeur, résumé et catégorie (publicité, travail ou autre) ; aucun email n’est envoyé ni modifié.</p>
       <div id="gmail-config-form" class="gmail-config-form" hidden>
-        <p class="panel-hint">Colle les identifiants OAuth de ton application Google. Ils restent sur cet ordinateur.</p>
-        <button id="gmail-oauth-help" class="gmail-oauth-help" type="button">Obtenir mes identifiants OAuth</button>
+        <p class="panel-hint">Connexion par mot de passe d’application : il reste sur cet ordinateur et n’ouvre qu’un accès en lecture seule.</p>
+        <button id="gmail-app-password-help" class="gmail-oauth-help" type="button">Créer un mot de passe d’application</button>
         <details class="gmail-oauth-steps">
           <summary>Comment faire ?</summary>
           <ol>
-            <li>Crée ou sélectionne un projet Google Cloud.</li>
-            <li>Active <strong>Gmail API</strong> dans la bibliothèque.</li>
-            <li>Configure l’écran de consentement OAuth et ajoute ton adresse comme utilisateur test.</li>
-            <li>Dans <strong>Identifiants</strong>, crée un client OAuth de type <strong>Application de bureau</strong>.</li>
-            <li>Copie le Client ID et le Client secret ici, puis clique sur le bouton d’enregistrement.</li>
+            <li>Active la validation en deux étapes sur ton compte Google, si ce n’est pas déjà fait.</li>
+            <li>Ouvre la page des mots de passe d’application (bouton ci-dessus) et crée-en un, nom libre (ex. « LOUPe »).</li>
+            <li>Dans Gmail : Paramètres → Transfert et POP/IMAP → active <strong>IMAP</strong>.</li>
+            <li>Colle ton adresse Gmail et le mot de passe généré ci-dessous, puis enregistre.</li>
           </ol>
-          <p class="panel-hint">Ne saisis jamais ton mot de passe Gmail dans 3loop : Google te le demandera dans sa propre fenêtre sécurisée.</p>
+          <p class="panel-hint">Ne saisis jamais ton mot de passe Gmail habituel ici : uniquement un mot de passe d’application dédié, révocable à tout moment depuis ton compte Google.</p>
         </details>
-        <label for="gmail-client-id">Client ID Google</label>
-        <input id="gmail-client-id" type="text" placeholder="...apps.googleusercontent.com" autocomplete="off" />
-        <label for="gmail-client-secret">Client secret Google</label>
-        <input id="gmail-client-secret" type="password" placeholder="Client secret" autocomplete="new-password" />
+        <label for="gmail-address">Adresse Gmail</label>
+        <input id="gmail-address" type="email" placeholder="toi@gmail.com" autocomplete="off" />
+        <label for="gmail-app-password">Mot de passe d’application</label>
+        <input id="gmail-app-password" type="password" placeholder="xxxx xxxx xxxx xxxx" autocomplete="new-password" />
         <button id="gmail-save-config" class="btn-upload workspace-action" type="button">Enregistrer et connecter</button>
       </div>
       <div class="gmail-actions">
-        <button id="gmail-connect" class="btn-upload workspace-action" type="button" hidden>Connecter Gmail</button>
         <button id="gmail-refresh" class="workspace-action" type="button" hidden>Lire les emails des dernières 24 heures</button>
       </div>
       <p id="gmail-status" class="panel-hint" role="status" aria-live="polite">Vérification de la connexion…</p>
@@ -252,7 +254,11 @@
 
     <div class="panel-card">
       <h4>Documents</h4>
-      <p class="panel-hint">PDF, texte ou markdown. Coché = inclus dans le prochain message et analysé localement, même hors connexion.</p>
+      <p class="panel-hint">PDF, texte ou markdown. Coché = inclus dans le prochain message et analysé localement, même hors connexion. La bibliothèque est partagée entre toutes les conversations.</p>
+      <label class="switch-row">
+        <input id="library-toggle" type="checkbox" />
+        <span>Laisser le modèle parcourir toute ma bibliothèque</span>
+      </label>
       <label class="btn-upload">
         + Ajouter un document
         <input id="document-input" type="file" accept=".pdf,.txt,.md,.markdown,.csv,.log,.png,.jpg,.jpeg,.webp,.bmp,.gif" multiple hidden />

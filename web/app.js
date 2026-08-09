@@ -145,10 +145,9 @@ const reflectionSection = el("reflection-section");
 const reflectionSelect = el("reflection-select");
 const reflectionHint = el("reflection-hint");
 const thinkingToggle = el("thinking-toggle");
-const cyclesRange = el("cycles-range");
-const cyclesValue = el("cycles-value");
-const tokensRange = el("tokens-range");
-const tokensValue = el("tokens-value");
+const cyclesControl = el("cycles-control");
+const cyclesToggle = el("cycles-toggle");
+const DEFAULT_MAX_TOKENS = 256;
 const kindSelect = el("kind-select");
 const newChatBtn = el("new-chat");
 const researchQuestionInput = el("research-question");
@@ -451,8 +450,6 @@ function addUserMessage(text) {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-const ORBIT_HTML = `<span class="orbit" aria-hidden="true"><span class="agent a1"></span><span class="agent a2"></span><span class="agent a3"></span></span>`;
-
 const TRACE_LABELS = {
   started: "Départ",
   planned: "Plan",
@@ -539,7 +536,7 @@ function addAssistantMessage({ title = "Carnet de laboratoire", watch = false } 
   wrap._researchTrace = [];
   wrap._traceStartedAt = Date.now();
   wrap.innerHTML = `
-    <div class="msg-avatar thinking-avatar">${mascotSprite(32, { watch, kind: visualKind })}${ORBIT_HTML}</div>
+    <div class="msg-avatar thinking-avatar">${mascotSprite(32, { watch, kind: visualKind })}</div>
     <div class="msg-body">
       <article class="lab-notebook-page" aria-label="Réponse dans le carnet de laboratoire">
         <header class="lab-notebook-header">
@@ -549,7 +546,7 @@ function addAssistantMessage({ title = "Carnet de laboratoire", watch = false } 
         </header>
         <div class="msg-content lab-notebook-content">
           <div class="cli-interactions" aria-live="polite"></div>
-          <div class="thinking"><span class="lab-researcher-cursor" aria-hidden="true"></span>${ORBIT_HTML}<span class="thinking-text">Les agents préparent le protocole…</span></div>
+          <div class="thinking"><span class="lab-researcher-cursor" aria-hidden="true"></span><span class="thinking-text">Les agents préparent le protocole…</span></div>
         </div>
         <details class="lab-research-trace" open>
           <summary><span>Journal de recherche</span><span class="lab-trace-summary-text">0 étape</span></summary>
@@ -709,6 +706,7 @@ function errorInAssistantMessage(wrap, message) {
 // out of the way once dismissed.
 
 const documentListEl = el("document-list");
+const libraryToggle = el("library-toggle");
 const discussionListEl = el("discussion-list");
 const sidePanelEl = el("side-panel");
 const sidePanelToggleEl = el("side-panel-toggle");
@@ -918,13 +916,33 @@ function attachedDocumentsContext() {
   // scans every selected document, and returns a single bounded set of
   // relevant excerpts. Sending full text for every checkbox here could
   // overflow Qwen3's local context window before it can answer.
+  // When the library toggle is on, every document already in the shared,
+  // offline library counts as selected - not just the ones individually
+  // checked - so the model can search the whole thing without the user
+  // re-checking each file every conversation.
+  const wholeLibrary = Boolean(libraryToggle?.checked);
   const versionIds = [...new Set(
     state.documents
-      .filter((doc) => doc.included && !doc.loading && doc.versionId)
+      .filter((doc) => !doc.loading && doc.versionId && (wholeLibrary || doc.included))
       .map((doc) => String(doc.versionId).trim())
       .filter(Boolean)
   )];
   return versionIds.length ? `3LOOP_DOCUMENT_VERSION_IDS=${versionIds.join(",")}` : "";
+}
+
+function storedLibraryPreference() {
+  try {
+    return localStorage.getItem("3loop_library_enabled") === "1";
+  } catch {
+    return false;
+  }
+}
+
+if (libraryToggle) {
+  libraryToggle.checked = storedLibraryPreference();
+  libraryToggle.addEventListener("change", () => {
+    try { localStorage.setItem("3loop_library_enabled", libraryToggle.checked ? "1" : "0"); } catch { /* ignore */ }
+  });
 }
 
 // ---- conversations (save / reload / export / delete) ---------------------
@@ -1843,6 +1861,38 @@ function updateReflectionControl() {
   if (local) populateReflectionLevels();
 }
 
+// How many debate cycles the Cycles toggle buys depends on how much
+// reflection is already happening: Flash/Flash lite are fast single-pass
+// tiers where a second cycle isn't worth the wait, Élevé buys one extra
+// cycle, Très élevé two — "ainsi de suite" as the reflection level climbs.
+const CYCLE_BASE_BY_REFLECTION = { lite: 1, flash: 1, high: 2, very_high: 3 };
+
+function storedCyclesPreference() {
+  try {
+    return localStorage.getItem("3loop_cycles_enabled") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function deriveMaxCycles() {
+  const enabled = cyclesToggle ? Boolean(cyclesToggle.checked) : false;
+  if (!enabled) return 1;
+  if (isOllamaBackend()) {
+    const level = reflectionSelect?.value || "lite";
+    return CYCLE_BASE_BY_REFLECTION[level] || 1;
+  }
+  return 2;
+}
+
+function updateCyclesControl() {
+  if (!cyclesControl || !cyclesToggle) return;
+  const cycles = deriveMaxCycles();
+  cyclesControl.title = cyclesToggle.checked
+    ? `Cycles actifs : ${cycles} cycle(s) de débat entre les agents.`
+    : "Cycles inactifs : une seule passe par agent.";
+}
+
 function populateOllamaModels(models) {
   modelSelect.innerHTML = models
     .map((model) => `<option value="${escapeHtml(model)}">${escapeHtml(ollamaModelLabel(model))}</option>`)
@@ -1858,6 +1908,56 @@ async function loadConfig() {
   // Gmail analysis must wait for the selected backend/model to be populated;
   // otherwise an initial race could silently use the demo backend.
   void loadGmailStatus();
+  void checkForUpdate();
+}
+
+// ---------------------------------------------------------------- update banner
+//
+// One GET to a local endpoint (which itself does one unauthenticated GET to
+// GitHub's public releases API - no telemetry, no user data). Never blocks
+// startup: fired after the rest of loadConfig() has already run, and any
+// failure just leaves the banner hidden.
+
+async function checkForUpdate() {
+  const banner = el("update-banner");
+  if (!banner) return;
+  let info;
+  try {
+    const res = await fetch("/api/v1/update-check");
+    info = await res.json();
+  } catch {
+    return; // offline, or the endpoint failed - stay silent, never an error toast
+  }
+  if (!info || !info.update_available || !info.latest_version) return;
+
+  // Dismissing is remembered per-version: re-shown only once an even newer
+  // release ships, not on every reload of the same one.
+  let dismissedVersion = "";
+  try {
+    dismissedVersion = localStorage.getItem("loupe_update_dismissed") || "";
+  } catch {
+    /* ignore storage errors */
+  }
+  if (dismissedVersion === info.latest_version) return;
+
+  el("update-banner-text").textContent =
+    `Nouvelle version disponible : ${info.latest_version} (tu as ${info.current_version}).`;
+  const link = el("update-banner-link");
+  link.href = info.release_url || "https://github.com/ayouboa30/LOUPe/releases/latest";
+  banner.hidden = false;
+
+  el("update-banner-dismiss").addEventListener(
+    "click",
+    () => {
+      banner.hidden = true;
+      try {
+        localStorage.setItem("loupe_update_dismissed", info.latest_version);
+      } catch {
+        /* ignore storage errors */
+      }
+    },
+    { once: true },
+  );
 }
 
 // The searcher is deliberately *not* the chat backend: it always runs on a
@@ -2070,6 +2170,7 @@ function updateBackendUI() {
   updateCodingWriteUI();
   updateReflectionControl();
   updateThinkingControl();
+  updateCyclesControl();
 }
 
 // One delegated listener rather than one per block: code blocks and message
@@ -2117,6 +2218,7 @@ if (reflectionSelect) reflectionSelect.addEventListener("change", () => {
   try { localStorage.setItem("3loop_reflection_level", reflectionSelect.value); } catch { /* ignore */ }
   updateReflectionControl();
   updateThinkingControl();
+  updateCyclesControl();
 });
 if (thinkingToggle) thinkingToggle.addEventListener("change", () => {
   const backend = backendSelect.value;
@@ -2140,8 +2242,14 @@ apiKeyInput.addEventListener("input", () => {
   backendHint.className = apiKeyInput.value ? "hint" : "hint warn";
 });
 
-cyclesRange.addEventListener("input", () => (cyclesValue.textContent = cyclesRange.value));
-tokensRange.addEventListener("input", () => (tokensValue.textContent = tokensRange.value));
+if (cyclesToggle) {
+  cyclesToggle.checked = storedCyclesPreference();
+  cyclesToggle.addEventListener("change", () => {
+    try { localStorage.setItem("3loop_cycles_enabled", cyclesToggle.checked ? "1" : "0"); } catch { /* ignore */ }
+    updateCyclesControl();
+  });
+  updateCyclesControl();
+}
 
 newChatBtn.addEventListener("click", () => {
   state.sessionId = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
@@ -2268,8 +2376,8 @@ async function runPrompt(prompt, enginePrompt = prompt, controller) {
     allow_writes: allowWrites,
     workspace_path: workspacePath,
     research: researchToggle.checked && !allowWrites,
-    max_cycles: Number(cyclesRange.value),
-    max_tokens: Number(tokensRange.value),
+    max_cycles: deriveMaxCycles(),
+    max_tokens: DEFAULT_MAX_TOKENS,
     task_kind: kindSelect.value,
     ...(thinking === null ? {} : { thinking }),
   };
@@ -2748,7 +2856,7 @@ async function runBackgroundResearch(question) {
         backend: backendSelect.value,
         model: modelSelect.value,
         api_key: apiKeyInput.value,
-        max_tokens: Number(tokensRange.value),
+        max_tokens: DEFAULT_MAX_TOKENS,
         task_kind: kindSelect.value,
       }),
     });
@@ -3087,19 +3195,18 @@ messagesEl.addEventListener("click", (event) => {
 
 // ---------------------------------------------------------------- Gmail read-only
 //
-// OAuth is completed by the local Python server. This panel deliberately
-// receives only message metadata and the model's analysis; Gmail tokens and
-// raw message bodies never enter the browser.
-const gmailConnectButton = el("gmail-connect");
+// Authenticated with a Gmail app password over IMAP rather than OAuth: no
+// Google Cloud project to create, just two clicks in Gmail's own settings.
+// This panel deliberately receives only message metadata and the model's
+// analysis; the app password and raw message bodies never enter the browser.
 const gmailRefreshButton = el("gmail-refresh");
 const gmailConfigForm = el("gmail-config-form");
-const gmailOAuthHelpButton = el("gmail-oauth-help");
-const gmailClientIdInput = el("gmail-client-id");
-const gmailClientSecretInput = el("gmail-client-secret");
+const gmailAppPasswordHelpButton = el("gmail-app-password-help");
+const gmailAddressInput = el("gmail-address");
+const gmailAppPasswordInput = el("gmail-app-password");
 const gmailSaveConfigButton = el("gmail-save-config");
 const gmailStatusEl = el("gmail-status");
 const gmailListEl = el("gmail-list");
-let gmailAuthPoll = null;
 let gmailLoadedFor = "";
 let gmailAnalysisInFlight = null;
 
@@ -3146,37 +3253,20 @@ function setGmailStatus(text, kind = "") {
 }
 
 async function loadGmailStatus() {
-  if (!gmailStatusEl) return;
+  if (!gmailStatusEl) return null;
   try {
     const response = await fetch("/api/v1/gmail/status");
     const status = await response.json();
     if (!response.ok || status.error) throw new Error(status.error || `HTTP ${response.status}`);
-    if (!status.configured) {
-      gmailConfigForm.hidden = false;
-      gmailConnectButton.hidden = true;
-      gmailConnectButton.disabled = false;
-      gmailRefreshButton.hidden = true;
-      setGmailStatus(
-        "Colle tes identifiants OAuth Google ci-dessus pour commencer.",
-        "warn"
-      );
-      return status;
-    }
-    gmailConfigForm.hidden = true;
-    gmailConnectButton.hidden = status.connected;
-    gmailConnectButton.disabled = false;
-    gmailConnectButton.textContent = "Connecter Gmail";
+    gmailConfigForm.hidden = status.connected;
     gmailRefreshButton.hidden = !status.connected;
     if (!status.connected) {
       gmailLoadedFor = "";
+      setGmailStatus("Connecte un compte Gmail ci-dessus pour lire ses emails.", "warn");
+      return status;
     }
-    setGmailStatus(
-      status.connected
-        ? `Compte connecté : ${status.email || "Gmail"}. Scope : lecture seule.`
-        : "Client Google prêt. Connecte un compte pour lire ses emails.",
-      status.connected ? "ok" : ""
-    );
-    if (status.connected && state.config) {
+    setGmailStatus(`Compte connecté : ${status.email || "Gmail"}. Accès IMAP en lecture seule.`, "ok");
+    if (state.config) {
       const accountKey = String(status.email || "connected");
       if (gmailLoadedFor !== accountKey) {
         gmailLoadedFor = accountKey;
@@ -3190,8 +3280,8 @@ async function loadGmailStatus() {
   }
 }
 
-async function openGmailOAuthHelp() {
-  const url = "https://console.cloud.google.com/apis/credentials";
+async function openGmailAppPasswordHelp() {
+  const url = "https://myaccount.google.com/apppasswords";
   const opened = window.open(url, "_blank", "noopener,noreferrer");
   if (!opened) {
     try {
@@ -3204,75 +3294,39 @@ async function openGmailOAuthHelp() {
       /* The inline instructions remain available if the browser blocks it. */
     }
   }
-  setGmailStatus("Google Cloud est ouvert : reviens ici après avoir créé ton client OAuth.");
+  setGmailStatus("Page Google ouverte : reviens ici avec ton mot de passe d’application.");
 }
 
 async function saveGmailConfigAndConnect() {
-  const clientId = String(gmailClientIdInput?.value || "").trim();
-  const clientSecret = String(gmailClientSecretInput?.value || "").trim();
-  if (!clientId) {
-    setGmailStatus("Le Client ID Google est obligatoire.", "warn");
-    gmailClientIdInput?.focus();
+  const email = String(gmailAddressInput?.value || "").trim();
+  const appPassword = String(gmailAppPasswordInput?.value || "").trim();
+  if (!email) {
+    setGmailStatus("L’adresse Gmail est obligatoire.", "warn");
+    gmailAddressInput?.focus();
+    return;
+  }
+  if (!appPassword) {
+    setGmailStatus("Le mot de passe d’application est obligatoire.", "warn");
+    gmailAppPasswordInput?.focus();
     return;
   }
   gmailSaveConfigButton.disabled = true;
-  setGmailStatus("Enregistrement local des identifiants OAuth…");
+  setGmailStatus("Connexion au compte Gmail…");
   try {
     const response = await fetch("/api/v1/gmail/configure", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      body: JSON.stringify({ email, app_password: appPassword }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
-    // Do not retain the secret in the DOM longer than needed for this save.
-    if (gmailClientSecretInput) gmailClientSecretInput.value = "";
+    // Do not retain the app password in the DOM longer than needed for this save.
+    if (gmailAppPasswordInput) gmailAppPasswordInput.value = "";
     await loadGmailStatus();
-    await openGmailAuthorization();
-  } catch (error) {
-    setGmailStatus(`Configuration Gmail impossible : ${error.message || error}`, "warn");
-  } finally {
-    gmailSaveConfigButton.disabled = false;
-  }
-}
-
-async function openGmailAuthorization() {
-  gmailConnectButton.disabled = true;
-  setGmailStatus("Préparation de la connexion Google…");
-  try {
-    const response = await fetch("/api/v1/gmail/connect", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
-    const authUrl = String(payload.authorization_url || "");
-    if (!authUrl) throw new Error("URL de connexion Google absente.");
-    const opened = window.open(authUrl, "_blank", "noopener,noreferrer");
-    if (!opened) {
-      await fetch("/api/open-url", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: authUrl }),
-      });
-    }
-    setGmailStatus("Autorise 3loop dans l’onglet Google ouvert…");
-    clearInterval(gmailAuthPoll);
-    gmailAuthPoll = window.setInterval(async () => {
-      const status = await loadGmailStatus();
-      if (status?.connected) {
-        clearInterval(gmailAuthPoll);
-        gmailAuthPoll = null;
-      }
-    }, 1500);
-    window.setTimeout(() => {
-      clearInterval(gmailAuthPoll);
-      gmailAuthPoll = null;
-    }, 120000);
   } catch (error) {
     setGmailStatus(`Connexion Gmail impossible : ${error.message || error}`, "warn");
-    gmailConnectButton.disabled = false;
+  } finally {
+    gmailSaveConfigButton.disabled = false;
   }
 }
 
@@ -3323,8 +3377,7 @@ function loadGmailMessages() {
   return request;
 }
 
-if (gmailOAuthHelpButton) gmailOAuthHelpButton.addEventListener("click", openGmailOAuthHelp);
+if (gmailAppPasswordHelpButton) gmailAppPasswordHelpButton.addEventListener("click", openGmailAppPasswordHelp);
 if (gmailSaveConfigButton) gmailSaveConfigButton.addEventListener("click", saveGmailConfigAndConnect);
-if (gmailConnectButton) gmailConnectButton.addEventListener("click", openGmailAuthorization);
 if (gmailRefreshButton) gmailRefreshButton.addEventListener("click", loadGmailMessages);
 loadGmailStatus();

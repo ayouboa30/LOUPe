@@ -828,6 +828,28 @@ def _work_area(hwnd: wintypes.HWND | None, probe: tuple[int, int]) -> tuple[int,
     )
 
 
+#: Spawn margin from the work-area edge: comfortably clear of the ~128px
+#: sprite so it lands fully on screen rather than clipped at the corner.
+_DEFAULT_SPAWN_MARGIN = 170
+
+
+def _default_spawn_position() -> tuple[int, int]:
+    """Bottom-right corner of the primary monitor's work area.
+
+    Previously a fixed (60, 60) - top-left - which is exactly where this
+    app's own sidebar lives, so the companion spawned directly on top of
+    the app's own UI on every launch. Bottom-right keeps it clear of both
+    the sidebar (left edge) and the taskbar (excluded from the work area)
+    while remaining freely draggable anywhere afterwards.
+    """
+
+    left, top, right, bottom = _work_area(None, (0, 0))
+    return (
+        max(left, right - _DEFAULT_SPAWN_MARGIN),
+        max(top, bottom - _DEFAULT_SPAWN_MARGIN),
+    )
+
+
 @dataclass(frozen=True)
 class _Clip:
     """One animation clip, straight out of the sheet's metadata."""
@@ -850,14 +872,18 @@ class NativeWidget:
         self,
         on_click: Callable[[], None],
         *,
-        x: int = 60,
-        y: int = 60,
+        x: int | None = None,
+        y: int | None = None,
         port: int | None = None,
         on_close: Callable[[], None] | None = None,
     ) -> None:
         self._on_click = on_click
         self._on_close = on_close
         self._port = port
+        if x is None or y is None:
+            default_x, default_y = _default_spawn_position()
+            x = default_x if x is None else x
+            y = default_y if y is None else y
         self._x = x
         self._y = y
         self._hwnd: wintypes.HWND | None = None

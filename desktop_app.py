@@ -182,7 +182,7 @@ def _open_native_window(
 
     try:
         main_window = webview.create_window(
-            "LOUPe beta 0.1",
+            "LOUPe beta 0.1.1",
             url,
             width=1360,
             height=880,
