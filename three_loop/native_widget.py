@@ -155,6 +155,7 @@ from .assistant_actions import (
     search_from_text,
 )
 from .bubble import Bubble, BubbleContent, BubbleLink
+from .eye_tracker import get_eye_tracker
 from .prompt_window import ask_question
 from .screen_watcher import INTERVAL_CHOICES_MINUTES, ScreenWatcher, WatchResult
 
@@ -582,6 +583,17 @@ _TOPMOST_REASSERT_SECONDS = 1.0
 #: second window and a layout manager for a line of text.
 _SAY_STEP = 0
 _SAY_RESULT = 1
+
+#: How often the mascot asks the eye tracker whether the gaze is stuck. The
+#: redraw timer runs at ~30 fps, and polling a lock-protected dataclass that
+#: often would be pure waste for a signal that changes on the order of
+#: seconds.
+_GAZE_CHECK_SECONDS = 1.0
+
+#: Quiet period after the user dismisses a help offer. Matches the intent
+#: stated for the idle-based proposal: refusing once must buy real silence,
+#: not a fresh prompt as soon as the gaze settles again.
+_GAZE_OFFER_COOLDOWN_SECONDS = 20 * 60.0
 
 #: Model answers land in a bubble, and a bubble has no scroll area: its height
 #: is measured from its content (see ``bubble.py``), so an unbounded answer
@@ -1070,6 +1082,22 @@ class NativeWidget:
         #: lives, so it cannot disagree with what is actually displayed.
         self._bubble_is_result = False
 
+        # -- gaze-blocked help offer. The eye tracker is a singleton living in
+        # this same process (three_loop/eye_tracker.py), so the mascot reads
+        # its state directly rather than through the HTTP API. Nothing here
+        # starts the tracker or touches the camera: if the user never turned
+        # tracking on, `event_seq` simply never moves and this stays inert.
+        self._last_gaze_event = 0
+        self._next_gaze_check_at = now + _GAZE_CHECK_SECONDS
+        #: Refusing an offer must buy real quiet, otherwise a user who is
+        #: concentrating on one spot gets nagged every few seconds by the very
+        #: feature meant to help them.
+        self._gaze_offer_muted_until = 0.0
+        #: True while a help offer is on screen waiting to be accepted, so a
+        #: click on the character opens the question card instead of doing
+        #: what a body click normally does (bring the main window up).
+        self._gaze_offer_pending = False
+
     def start(self) -> None:
         self._thread.start()
         # Only worth polling when there is a server to ask. Without a port the
@@ -1385,6 +1413,106 @@ class NativeWidget:
             self._start_clip(_CLIP_IDLE)
             self._announce_research()
 
+    def _maybe_offer_gaze_help(self, now: float) -> None:
+        """Offer help when the eye tracker reports a stuck gaze. UI thread.
+
+        This is what the feature promised - "when the gaze stays in one place,
+        LOUPe offers help" - and what was missing: the tracker computed the
+        blocked state and the web page reacted to it, but only by focusing its
+        own text field. If the user is stuck reading something else, that page
+        is not even on screen, so nothing was ever offered.
+
+        Deliberately edge-triggered on ``event_seq`` rather than on the state:
+        ``blocked`` stays true for as long as the gaze holds, so reacting to
+        the state would re-offer on every frame. The tracker bumps the counter
+        once per blocked episode.
+        """
+
+        if now < self._next_gaze_check_at:
+            return
+        self._next_gaze_check_at = now + _GAZE_CHECK_SECONDS
+        # Never talk over an ongoing task, a result waiting to be read, or a
+        # user who just refused an offer.
+        if self._busy or self._bubble_is_result or now < self._gaze_offer_muted_until:
+            return
+        try:
+            status = get_eye_tracker().status()
+        except Exception:
+            return  # a status read must never be able to break the render loop
+        event_seq = int(status.get("event_seq") or 0)
+        if event_seq <= self._last_gaze_event or not status.get("help_requested"):
+            return
+        self._last_gaze_event = event_seq
+        self._gaze_offer_pending = True
+        self._show_bubble(
+            BubbleContent(
+                title="Besoin d'un coup de main ?",
+                lines=(
+                    "Ton regard reste au même endroit depuis un moment.",
+                    "Clique-moi et dis-moi ce qui bloque.",
+                ),
+                # No timeout: an offer that vanishes on its own is one the user
+                # cannot accept. It goes away when clicked, or when the next
+                # bubble replaces it.
+                timeout_s=None,
+                footer="Clique pour poser ta question · ignore pour continuer",
+            ),
+            is_result=True,
+        )
+
+    def _accept_gaze_help(self) -> bool:
+        """Body click while a help offer is up: ask what is blocking. UI thread.
+
+        Returns True when the click was consumed by the offer, so the normal
+        body-click behaviour (raise the main window) does not also fire.
+        """
+
+        if not self._gaze_offer_pending:
+            return False
+        self._gaze_offer_pending = False
+        # Accepting once is enough of an answer for a while either way: the
+        # user is now being helped, and should not be asked again mid-task.
+        self._gaze_offer_muted_until = time.monotonic() + _GAZE_OFFER_COOLDOWN_SECONDS
+        if self._busy or self._port is None:
+            return True
+        self._busy = True
+        threading.Thread(
+            target=self._gaze_help_worker, daemon=True, name="3loop-widget-gaze-help"
+        ).start()
+        return True
+
+    def _gaze_help_worker(self) -> None:
+        """Ask the question, then hand it to the engine like the mic flow does.
+
+        ``ask_question`` blocks and pumps its own message loop, so it must not
+        run on the widget's UI thread - the same reason the research flow uses
+        a worker.
+        """
+
+        try:
+            options = ask_question(
+                title="Qu'est-ce qui bloque ?",
+                description=(
+                    "Dis-moi ce sur quoi tu bloques, je m'en occupe. "
+                    "Laisse vide pour annuler."
+                ),
+                placeholder="ex: je ne comprends pas cette erreur",
+            )
+        except Exception:
+            options = None
+        question = options.text.strip() if options is not None else ""
+        if not question:
+            self._busy = False  # cancelled: the offer simply goes away
+            return
+        run_prompt_in_background(
+            question,
+            port=self._port,
+            on_done=self._finish_prompt,
+            on_started=lambda: self._say(
+                "C'est noté", f"Je réfléchis à « {question[:60]} ».", timeout_s=6.0
+            ),
+        )
+
     def _maybe_hop(self, now: float) -> None:
         """Bounce on a timer, or on request - but only from a settled idle.
 
@@ -1559,6 +1687,7 @@ class NativeWidget:
         self._advance_animation(now)
         if self._window_hidden:
             return  # the vanish clip just ended and took the window with it
+        self._maybe_offer_gaze_help(now)
         self._maybe_hop(now)
         canvas = self._compose_canvas(
             self._frame_index(),
@@ -2413,9 +2542,10 @@ class NativeWidget:
                     self._start_research_flow()
                 elif hovering and self._point_in_rect(local_x, local_y, self._icon_rects[_VARIANT_WATCH]):
                     self._toggle_assistant_mode()
-                elif not self._reveal_pending_result():
+                elif not self._accept_gaze_help() and not self._reveal_pending_result():
                     # A body click means "open the app", unless the companion is
-                    # holding a research result - then it means "show me".
+                    # offering help or holding a research result - then it means
+                    # "yes please" / "show me".
                     try:
                         self._on_click()
                     except Exception:
