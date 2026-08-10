@@ -569,6 +569,29 @@ function updateThinkingStatus(wrap, text) {
   if (stateLabel && wrap.classList.contains("is-running")) stateLabel.textContent = "EN COURS";
 }
 
+// Draw the answer while it is still being generated. Local CPU generation
+// runs for tens of seconds, and the run used to show nothing at all until it
+// finished. The text is appended as plain text on purpose: half-written
+// markdown renders as broken markup, so the proper render happens once at the
+// end, from the parsed result, which stays authoritative.
+function appendPartialSolution(wrap, text) {
+  if (!wrap || !text) return;
+  const container = wrap.querySelector(".msg-content");
+  if (!container) return;
+  let live = container.querySelector(".live-answer");
+  if (!live) {
+    const thinking = container.querySelector(".thinking");
+    if (thinking) thinking.remove();
+    live = document.createElement("div");
+    live.className = "live-answer";
+    container.appendChild(live);
+  }
+  live.textContent += text;
+  const nearBottom =
+    messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 120;
+  if (nearBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
 function renderCliInteraction(wrap, request) {
   const id = String(request.interaction_id || "").trim();
   if (!id || state.cliInteractions.has(id)) return;
@@ -2492,6 +2515,9 @@ function handleSseEvent(rawEvent, wrap, votes, payload) {
     case "cycle_started":
       appendResearchTrace(wrap, "decision", `Cycle ${data.cycle} lancé.`);
       updateThinkingStatus(wrap, `Cycle ${data.cycle} démarré…`);
+      break;
+    case "solution_partial":
+      appendPartialSolution(wrap, data.text);
       break;
     case "research_query":
       if (data.role) {

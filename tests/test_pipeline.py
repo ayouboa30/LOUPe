@@ -216,7 +216,7 @@ def test_lazy_mode_omits_side_panel_fields_from_the_requested_schema() -> None:
             super().__init__()
             self.prompt = ""
 
-        async def _complete(self, prompt, *, temperature, system_prompt, max_tokens):
+        async def _complete(self, prompt, *, temperature, system_prompt, max_tokens, on_token=None):
             self.prompt = prompt
             return (
                 '{"final_solution":"reponse","votes":['

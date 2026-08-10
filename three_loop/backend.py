@@ -35,8 +35,15 @@ class SharedLLMBackend(ABC):
         temperature: float,
         system_prompt: str | None = None,
         max_tokens: int | None = None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
-        """Generate one completion while preventing concurrent model calls."""
+        """Generate one completion while preventing concurrent model calls.
+
+        ``on_token`` receives generated text as it arrives, for backends that
+        can stream. It is a display hook only: the return value stays the
+        complete text, so a caller that ignores it behaves exactly as before,
+        and a backend that cannot stream simply never calls it.
+        """
 
         if not self.serialize_requests:
             return await self._complete(
@@ -44,6 +51,7 @@ class SharedLLMBackend(ABC):
                 temperature=temperature,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,
+                on_token=on_token,
             )
         async with self._lock_for_current_loop():
             return await self._complete(
@@ -51,6 +59,7 @@ class SharedLLMBackend(ABC):
                 temperature=temperature,
                 system_prompt=system_prompt,
                 max_tokens=max_tokens,
+                on_token=on_token,
             )
 
     def _lock_for_current_loop(self) -> asyncio.Lock:
@@ -71,6 +80,7 @@ class SharedLLMBackend(ABC):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         """Implement a provider-specific completion call."""
 
@@ -92,6 +102,7 @@ class FunctionBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {
             "temperature": temperature,
@@ -386,6 +397,7 @@ class LlamaCppBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         messages = _messages(prompt, system_prompt)
 
@@ -474,6 +486,7 @@ class AirLLMBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         del temperature
         full_prompt = (
@@ -530,6 +543,7 @@ class LiteLLMBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         try:
             from litellm import acompletion
@@ -588,6 +602,7 @@ class OllamaBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         import urllib.error
         import urllib.request
@@ -664,6 +679,55 @@ class OllamaBackend(SharedLLMBackend):
                 }
             else:
                 payload["format"] = "json"
+
+        # Streaming is requested only when someone is listening. It changes
+        # the response format (one JSON object per line instead of one
+        # document), so a caller that passes no hook keeps the simpler path
+        # and the exact behaviour it had before.
+        if on_token is not None:
+            payload["stream"] = True
+
+            def invoke_streaming() -> str:
+                data = json.dumps(payload).encode("utf-8")
+                request = urllib.request.Request(
+                    f"{self.host}/api/chat",
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                pieces: list[str] = []
+                try:
+                    with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                        for raw_line in response:
+                            line = raw_line.decode("utf-8", errors="replace").strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            fragment = str(
+                                (event.get("message") or {}).get("content", "")
+                            )
+                            if fragment:
+                                pieces.append(fragment)
+                                try:
+                                    on_token(fragment)
+                                except Exception:
+                                    # The display hook must never be able to
+                                    # abort a generation that is going fine.
+                                    pass
+                            if event.get("done"):
+                                break
+                except urllib.error.URLError as exc:
+                    raise RuntimeError(
+                        f"Impossible de joindre Ollama sur {self.host}; "
+                        "verifiez que `ollama serve` tourne et que le modele est "
+                        f"disponible (`ollama pull {self.model}`)."
+                    ) from exc
+                return "".join(pieces)
+
+            return await asyncio.to_thread(invoke_streaming)
 
         def invoke() -> str:
             data = json.dumps(payload).encode("utf-8")
@@ -760,6 +824,7 @@ class CloudApiBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         import urllib.error
         import urllib.request
@@ -829,6 +894,7 @@ class DemoBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         del temperature, max_tokens
         self.calls += 1

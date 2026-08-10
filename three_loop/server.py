@@ -2444,6 +2444,28 @@ class Handler(BaseHTTPRequestHandler):
         # backend and attached to run_completed below.
         run_identity = _backend_identity(str(payload.get("backend", "demo")), backend)
 
+        # The answer is streamed to the page as it is generated. Local CPU
+        # generation takes tens of seconds, and without this the user watches
+        # a static label for all of it.
+        #
+        # ``emit`` writes to the same socket the run loop writes to, and this
+        # callback is invoked from the worker thread doing the HTTP read, so
+        # it is handed back to the event loop rather than writing directly:
+        # two threads interleaving partial writes would corrupt the SSE
+        # stream. The loop reference is captured when the run starts, below.
+        partial_loop: list[asyncio.AbstractEventLoop] = []
+
+        def stream_partial_solution(text: str) -> None:
+            if not text or not partial_loop:
+                return
+            try:
+                partial_loop[0].call_soon_threadsafe(
+                    emit, "solution_partial", {"text": text}
+                )
+            except RuntimeError:
+                # Loop already closed (run cancelled): nothing left to draw on.
+                pass
+
         session_id = str(payload.get("session_id", "default"))
         optimizer = _SESSIONS.setdefault(session_id, TemperatureOptimizer(seed=7))
         # The transcript reaches every backend - CLI agents included - through
@@ -2529,11 +2551,13 @@ class Handler(BaseHTTPRequestHandler):
             ),
             search_provider=provider,
             support_backend=backend if write_mode else _support_backend(backend),
+            on_partial_solution=stream_partial_solution,
         )
         kind_raw = payload.get("task_kind")
         explicit_kind = None if not kind_raw or kind_raw == "auto" else TaskKind(kind_raw)
 
         async def run() -> None:
+            partial_loop.append(asyncio.get_running_loop())
             async for event in pipeline.stream(
                 prompt,
                 kind=explicit_kind,

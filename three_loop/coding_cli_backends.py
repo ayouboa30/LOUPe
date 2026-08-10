@@ -28,7 +28,12 @@ import subprocess
 import sys
 from collections.abc import Sequence
 
-from .cli_agent_backend import CLIAgentBackend, _CREATE_NO_WINDOW, find_executable
+from .cli_agent_backend import (
+    CLIAgentBackend,
+    _CREATE_NO_WINDOW,
+    find_executable,
+    login_hint as _login_hint,
+)
 
 #: "sonnet" is Claude Code's own rolling alias for its latest Sonnet model
 #: (confirmed in ``claude --help``: "--model ... Provide an alias for the
@@ -164,6 +169,33 @@ class ClaudeCodeBackend(CLIAgentBackend):
                     return result.strip()
         return ""
 
+    def explain_failure(self, stdout: str, stderr: str) -> str:
+        # Measured on this machine with a logged-out CLI: the failure arrives
+        # as a perfectly ordinary-looking success envelope -
+        #   {"type":"result","subtype":"success","is_error":true,
+        #    "result":"Not logged in · Please run /login"}
+        # so ``subtype`` cannot be trusted and ``is_error`` is the real flag.
+        # Before this hook the user saw that whole JSON blob; the sentence
+        # they actually need is one field inside it.
+        del stderr
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "result" or not event.get("is_error"):
+                continue
+            message = str(event.get("result") or "").strip()
+            if not message:
+                continue
+            return f"Claude Code : {message[:300]}" + _login_hint(
+                message, "lance `claude` dans un terminal pour te connecter"
+            )
+        return ""
+
 
 class CodexBackend(CLIAgentBackend):
     """Delegates to a locally installed OpenAI Codex CLI (``codex exec``)."""
@@ -213,3 +245,34 @@ class CodexBackend(CLIAgentBackend):
                 if isinstance(text, str):
                     chunks.append(text)
         return "".join(chunks).strip()
+
+    def explain_failure(self, stdout: str, stderr: str) -> str:
+        """Surface Codex's own error line rather than its NDJSON transcript.
+
+        Codex reports trouble either as a typed ``error`` event or, when it
+        never got far enough to emit NDJSON at all (missing login, bad
+        config), as a plain sentence on stderr.
+        """
+
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") not in ("error", "item.error"):
+                continue
+            message = str(
+                event.get("message") or (event.get("error") or {}).get("message") or ""
+            ).strip()
+            if message:
+                return f"Codex : {message[:300]}" + _login_hint(
+                    message, "lance `codex login`"
+                )
+        plain = (stderr or "").strip()
+        if plain:
+            first = plain.splitlines()[0].strip()
+            return f"Codex : {first[:300]}" + _login_hint(plain, "lance `codex login`")
+        return ""

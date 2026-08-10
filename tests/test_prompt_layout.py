@@ -29,7 +29,7 @@ class _CapturingBackend(SharedLLMBackend):
         super().__init__()
         self.prompts: list[str] = []
 
-    async def _complete(self, prompt, *, temperature, system_prompt, max_tokens):
+    async def _complete(self, prompt, *, temperature, system_prompt, max_tokens, on_token=None):
         del temperature, system_prompt, max_tokens
         self.prompts.append(prompt)
         return (

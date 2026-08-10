@@ -33,6 +33,7 @@ from .cli_agent_backend import (
     _workspace as _shared_workspace,
     build_cli_agent_prompt,
     find_executable,
+    login_hint as _login_hint,
 )
 
 DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
@@ -232,10 +233,14 @@ class OpenCodeBackend(CLIAgentBackend):
         ]
 
     def parse_output(self, stdout: str, stderr: str) -> str:
-        text = _extract_text(stdout)
-        if text:
-            return text
+        return _extract_text(stdout)
+
+    def explain_failure(self, stdout: str, stderr: str) -> str:
+        # Same contract as the sibling CLI backends: parse_output only
+        # extracts, this explains an empty extraction. It used to raise from
+        # inside parse_output, which worked but meant each backend reported
+        # failure its own way.
         error = _extract_error(stdout, stderr)
-        if error:
-            raise RuntimeError(f"OpenCode a signalé une erreur : {error[:500]}")
-        return ""
+        if not error:
+            return ""
+        return f"OpenCode : {error[:300]}" + _login_hint(error, "lance `opencode auth login`")

@@ -632,6 +632,91 @@ chemin par défaut**. Un utilisateur en profil « Élevé » / « Très élevé 
 par le profil 1.7B Flash. Sans effet pour qui est déjà en 1.7B : mieux vaut
 un seul modèle résident que deux.
 
+## 9. Le temps perçu : diffusion de la réponse pendant sa génération
+
+Les sections précédentes réduisent le temps *réel*. Celle-ci s'attaque à une
+grandeur différente : le temps pendant lequel l'utilisateur ne voit **rien**.
+
+Le débat compact renvoie un seul objet JSON, et `OllamaBackend` demandait
+`stream: false`. L'écran restait donc figé sur « Cycle 1 démarré… » pendant
+toute la génération. Sur un CPU, c'est la quasi-totalité de l'attente.
+
+`final_solution` étant le **premier** champ du schéma, il peut être affiché
+au fil de sa production. Mesuré sur le vrai serveur HTTP, en consommant le
+flux SSE comme le fait le navigateur :
+
+| | 1er texte à l'écran | réponse complète | écran vide supprimé |
+|---|---|---|---|
+| question courte | **2,97 s** | 7,74 s | 4,8 s |
+| tâche de code | **2,44 s** | 41,22 s | **38,8 s** |
+
+Le débit ne change pas : c'est la même génération. Ce qui change, c'est que
+l'attente devient lisible au lieu d'être vide — et l'écart grandit avec la
+longueur de la réponse, donc précisément là où c'était le plus pénible.
+
+**Propriété vérifiée : `texte diffusé == réponse finale`** dans les deux cas.
+Un flux qui dériverait de l'objet analysé afficherait une chose et en
+enregistrerait une autre ; c'est ce que ce test verrouille.
+
+### Ce que la diffusion n'a pas le droit de casser
+
+Le texte arrive par fragments arbitraires, donc une frontière de morceau
+peut tomber au milieu d'une séquence d'échappement. `SolutionStreamer` ne
+livre que ce qui est **prouvablement complet** et garde le reste.
+
+Un test de propriété (656 découpages aléatoires, plus le cas pathologique
+d'un caractère par fragment) compare la sortie à `json.loads` du même champ.
+Il a trouvé un vrai défaut : les caractères hors BMP — les emoji — sont
+encodés en **paire de substitution UTF-16** (`🎉`). Décoder chaque
+moitié séparément produisait deux demi-caractères invalides. La paire est
+désormais recombinée, et une moitié isolée devient un caractère de
+remplacement plutôt qu'une sortie invalide.
+
+La diffusion reste un pur confort d'affichage : la réponse qui fait foi est
+l'objet analysé à la fin. Un flux qui s'arrête tôt coûte un écran moins
+vivant, jamais une réponse fausse.
+
+## 10. Connexions aux fournisseurs — ce que « installé » ne dit pas
+
+Détecter l'exécutable ne prouve pas que le fournisseur répond. Test réel,
+même question envoyée à chacun :
+
+| fournisseur | état | temps |
+|---|---|---|
+| ollama (local) | OK | 2,7 s |
+| codex | OK | 15,8 s |
+| opencode | OK | 25,5 s |
+| claude code | **échec** | 2,8 s |
+
+Claude Code était installé, trouvé, appelé — et renvoyait une enveloppe
+d'apparence normale :
+
+```json
+{"type":"result","subtype":"success","is_error":true,
+ "result":"Not logged in · Please run /login"}
+```
+
+`subtype` vaut `success` : seul `is_error` dit la vérité. L'utilisateur
+recevait ce bloc JSON brut, qui ne dit pas quoi faire. Il lit désormais :
+
+> Claude Code : Not logged in · Please run /login — lance `claude` dans un
+> terminal pour te connecter, puis relance la demande.
+
+Le mécanisme (`explain_failure`) est commun aux trois CLI : `parse_output`
+extrait le texte, `explain_failure` explique une extraction vide. La
+commande de connexion n'est ajoutée que si le message est vraiment une
+erreur d'authentification — la suggérer pour une panne sans rapport
+enverrait l'utilisateur réparer quelque chose qui fonctionne.
+
+### Robustesse d'analyse — vérifiée, rien à corriger
+
+Les fournisseurs formatent différemment : OpenCode encadre son JSON dans une
+clôture markdown, Qwen3 peut précéder d'un bloc `<think>`. Dix formes
+réellement observées ou plausibles ont été passées à `parse_latent_debate` —
+clôture markdown, clés étrangères (`reponse`, `answer`), prose seule, JSON
+tronqué, sauts de ligne bruts dans une chaîne. **Les dix rendent la bonne
+réponse.** Aucun cas ne montre du JSON brut à l'utilisateur.
+
 ## Reproduire les mesures
 
 Les scripts de mesure sont volontairement courts et autonomes ; ils sont

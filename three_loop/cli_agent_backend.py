@@ -43,6 +43,31 @@ _CLI_LOCK_RETRIES = 3
 _CLI_LOCK_RETRY_DELAY_SECONDS = 1.0
 
 
+#: Words these CLIs use when the *session*, not the request, is the problem.
+#: Kept deliberately small: appending "log in to fix this" to an unrelated
+#: failure would send the user off repairing something that is not broken.
+_AUTH_MARKERS = (
+    "not logged in",
+    "log in",
+    "login",
+    "unauthenticated",
+    "unauthorized",
+    "authentication",
+    "not authenticated",
+    "credentials",
+    "session expired",
+)
+
+
+def login_hint(message: str, command_hint: str) -> str:
+    """Append the fixing command, but only for a genuine auth failure."""
+
+    lowered = message.casefold()
+    if any(marker in lowered for marker in _AUTH_MARKERS):
+        return f" — {command_hint}, puis relance la demande."
+    return ""
+
+
 def find_executable(name: str, *extra_candidates: Path) -> str | None:
     """Locate a CLI on PATH, with common npm/user-install fallbacks."""
 
@@ -298,6 +323,20 @@ class CLIAgentBackend(SharedLLMBackend):
     def parse_output(self, stdout: str, stderr: str) -> str:
         """Extract answer text from process output without raising on bad output."""
 
+    def explain_failure(self, stdout: str, stderr: str) -> str:
+        """Human, actionable reason why no text came back, or ``""``.
+
+        These CLIs report their real problem inside the same structured
+        output as a normal answer, so the difference between "broken" and
+        "just needs `/login`" is one field. Without this hook the user is
+        shown a raw JSON dump of the CLI's protocol, which says nothing about
+        what to do next; subclasses use it to surface the CLI's own sentence
+        plus the command that fixes it.
+        """
+
+        del stdout, stderr
+        return ""
+
     def _message_for_run(self, prompt: str, workspace: Path) -> str:
         """Add the matching access constraint when a caller used a generic prompt."""
 
@@ -319,6 +358,7 @@ class CLIAgentBackend(SharedLLMBackend):
         temperature: float,
         system_prompt: str | None,
         max_tokens: int | None,
+        on_token: Callable[[str], None] | None = None,
     ) -> str:
         # Headless CLIs do not consistently expose temperature/token controls;
         # their native defaults apply. Their own system prompts are retained.
@@ -393,6 +433,9 @@ class CLIAgentBackend(SharedLLMBackend):
                 f"reponse={len(text)}c writes={int(self.allow_writes)}",
             )
             if not text:
+                explained = self.explain_failure(stdout, stderr).strip()
+                if explained:
+                    raise RuntimeError(explained)
                 detail = (stderr or stdout or "").strip()
                 raise RuntimeError(
                     f"{self.agent_name} n'a renvoye aucun texte"

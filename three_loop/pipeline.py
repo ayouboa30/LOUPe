@@ -109,6 +109,7 @@ class ThreeLoopPipeline:
         search_provider: SearchProvider | None = None,
         agents: Mapping[AgentRole, RoleAgent] | None = None,
         support_backend: SharedLLMBackend | None = None,
+        on_partial_solution: Callable[[str], None] | None = None,
     ) -> None:
         self.backend = backend
         # Support roles only summarise; they do not reason about the task, so
@@ -124,6 +125,7 @@ class ThreeLoopPipeline:
             backend,
             max_tokens=self.config.max_tokens,
             lazy_debate_fields=self.config.lazy_debate_fields,
+            on_partial_solution=on_partial_solution,
         )
         self._context_agent = ContextAgent(self.support_backend)
         self._research_agent = ResearchAgent(self.support_backend)

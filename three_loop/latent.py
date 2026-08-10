@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from .agents import parse_vote
 from .backend import SharedLLMBackend
@@ -37,6 +37,131 @@ def _schema(lazy: bool) -> str:
     return _LAZY_SCHEMA if lazy else _FULL_SCHEMA
 
 
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+
+
+class SolutionStreamer:
+    """Decode a JSON string field while the JSON is still being generated.
+
+    The compact debate returns one JSON object, so the user would normally
+    see nothing until the whole thing is parsed - on a local CPU that is the
+    entire generation, tens of seconds of a frozen screen. ``final_solution``
+    is the first field of the schema, so it can be surfaced as it is produced.
+
+    Everything here is about *partial* input: a chunk boundary can fall in
+    the middle of a ``\\uXXXX`` escape or right after a lone backslash, and
+    emitting those raw would put stray characters on screen that a later
+    correction cannot take back. Anything not yet provably complete is held
+    until the next chunk.
+
+    Only ever an optimisation for display: the authoritative answer is still
+    the fully parsed object, so a stream that gives up early costs a less
+    lively screen, never a wrong answer.
+    """
+
+    def __init__(self, field: str = "final_solution") -> None:
+        self._needle = f'"{field}"'
+        self._raw = ""
+        self._value_start: int | None = None
+        self._cursor = 0
+        self.finished = False
+
+    def feed(self, chunk: str) -> str:
+        """Add generated text and return whatever became readable."""
+
+        if self.finished or not chunk:
+            return ""
+        self._raw += chunk
+        if self._value_start is None:
+            self._value_start = self._locate_value()
+            if self._value_start is None:
+                return ""
+            self._cursor = self._value_start
+        return self._decode_available()
+
+    def _locate_value(self) -> int | None:
+        """Index just past the opening quote of the field's value."""
+
+        key = self._raw.find(self._needle)
+        if key < 0:
+            return None
+        index = key + len(self._needle)
+        # Tolerate whitespace around the colon; the model formats freely.
+        while index < len(self._raw) and self._raw[index].isspace():
+            index += 1
+        if index >= len(self._raw) or self._raw[index] != ":":
+            return None
+        index += 1
+        while index < len(self._raw) and self._raw[index].isspace():
+            index += 1
+        if index >= len(self._raw) or self._raw[index] != '"':
+            return None
+        return index + 1
+
+    def _decode_available(self) -> str:
+        out: list[str] = []
+        index = self._cursor
+        raw = self._raw
+        limit = len(raw)
+        while index < limit:
+            char = raw[index]
+            if char == '"':
+                self.finished = True
+                break
+            if char != "\\":
+                out.append(char)
+                index += 1
+                continue
+            # An escape needs its payload before it can be decoded; stopping
+            # here leaves the backslash in the buffer for the next chunk.
+            if index + 1 >= limit:
+                break
+            marker = raw[index + 1]
+            if marker == "u":
+                if index + 6 > limit:
+                    break
+                try:
+                    code = int(raw[index + 2 : index + 6], 16)
+                except ValueError:
+                    out.append(raw[index : index + 6])
+                    index += 6
+                    continue
+                # Anything above the BMP - emoji, most notably - arrives as a
+                # UTF-16 surrogate *pair* when the model escapes its output.
+                # Decoding each half on its own yields two lone surrogates,
+                # which are not valid characters and render as tofu. Found by
+                # a property test feeding one character per chunk.
+                if 0xD800 <= code <= 0xDBFF:
+                    if index + 12 > limit:
+                        # Low half not generated yet: wait rather than emit
+                        # something that cannot be corrected afterwards.
+                        break
+                    low_escape = raw[index + 6 : index + 8] == "\\u"
+                    try:
+                        low = int(raw[index + 8 : index + 12], 16) if low_escape else -1
+                    except ValueError:
+                        low = -1
+                    if 0xDC00 <= low <= 0xDFFF:
+                        out.append(chr(0x10000 + (code - 0xD800) * 0x400 + (low - 0xDC00)))
+                        index += 12
+                        continue
+                    out.append("�")
+                    index += 6
+                    continue
+                if 0xDC00 <= code <= 0xDFFF:
+                    # Low half with no high half: unpaired, so unrepresentable.
+                    out.append("�")
+                    index += 6
+                    continue
+                out.append(chr(code))
+                index += 6
+                continue
+            out.append(_ESCAPES.get(marker, marker))
+            index += 2
+        self._cursor = index
+        return "".join(out)
+
+
 class LatentDebateCoordinator:
     """Ask one model context to run the three identities and the vote.
 
@@ -53,8 +178,13 @@ class LatentDebateCoordinator:
         *,
         max_tokens: int,
         lazy_debate_fields: bool = False,
+        on_partial_solution: Callable[[str], None] | None = None,
     ) -> None:
         self.backend = backend
+        # Display-only hook: receives the answer as it is generated so the
+        # screen is not frozen for the whole call. The parsed object below
+        # stays the source of truth for what is finally shown and stored.
+        self.on_partial_solution = on_partial_solution
         # ``heuristic``, ``critique`` and the three ``rationale`` fields are
         # 65% of the generated tokens and are never displayed unless the user
         # opens the side panel. Decoding costs 53 ms/token against 14.6 ms
@@ -146,6 +276,16 @@ class LatentDebateCoordinator:
             "Return only one valid JSON object:\n" + _schema(self.lazy_debate_fields),
         )
         temperature = sum(temperatures.values()) / len(temperatures)
+        on_token = None
+        if self.on_partial_solution is not None:
+            streamer = SolutionStreamer()
+            report = self.on_partial_solution
+
+            def on_token(fragment: str) -> None:
+                readable = streamer.feed(fragment)
+                if readable:
+                    report(readable)
+
         raw = await self.backend.complete(
             prompt,
             temperature=temperature,
@@ -154,6 +294,7 @@ class LatentDebateCoordinator:
                 "communication inside this single model context."
             ),
             max_tokens=self.max_tokens,
+            on_token=on_token,
         )
         return await self._parse_or_retry(raw, task=task, temperature=temperature)
 
