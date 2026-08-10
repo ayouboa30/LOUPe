@@ -564,6 +564,33 @@ async def _search_without_model(
     return await triangulate_sources(queries, provider, max_results=max_results, min_agents=1)
 
 
+def _smaller_ollama_backend(main_backend: OllamaBackend) -> SharedLLMBackend:
+    """Route the summarising roles to the fastest installed Qwen3 profile.
+
+    Same two-tier reasoning as the GGUF path below, applied to the backend the
+    app actually uses by default. It only pays off when the debate is running
+    a materially bigger profile: a user on "Élevé"/"Très élevé" (Qwen3 4B) gets
+    the context and research summaries produced by the 1.7B Flash profile
+    instead, while a user already on 1.7B keeps one single resident model
+    rather than loading a second one for no gain.
+    """
+
+    if main_backend.model == QWEN3_FLASH_LITE_MODEL:
+        return main_backend
+    installed = OllamaBackend.list_models(main_backend.host, timeout=1.5)
+    if QWEN3_FLASH_LITE_MODEL not in installed:
+        return main_backend
+    return OllamaBackend(
+        QWEN3_FLASH_LITE_MODEL,
+        host=main_backend.host,
+        timeout=main_backend.timeout,
+        keep_alive=main_backend.keep_alive,
+        # Summaries never want a reasoning trace, whatever the debate profile
+        # is set to: the whole point of this tier is that it is cheap.
+        thinking=False,
+    )
+
+
 def _support_backend(main_backend: SharedLLMBackend) -> SharedLLMBackend:
     """Pick the smallest local GGUF to run the summarising support roles.
 
@@ -575,6 +602,8 @@ def _support_backend(main_backend: SharedLLMBackend) -> SharedLLMBackend:
     cost asymmetry).
     """
 
+    if isinstance(main_backend, OllamaBackend):
+        return _smaller_ollama_backend(main_backend)
     if not isinstance(main_backend, LlamaCppBackend):
         return main_backend
     candidates = []
@@ -2467,7 +2496,14 @@ class Handler(BaseHTTPRequestHandler):
         # In write mode this is intentionally bypassed: a second cycle could
         # issue a second edit after the first result, which violates the
         # one-explicit-run safety contract exposed by the UI.
-        auto_route = bool(payload.get("auto_route", True))
+        # An explicit max_cycles from the caller wins over the difficulty
+        # heuristic: the composer now exposes a Cycles control derived from the
+        # reasoning level, and silently overriding it would make that control
+        # do nothing. Auto-routing stays the default only for callers that
+        # express no preference (CLI, desktop widget), where guessing beats
+        # a fixed constant.
+        requested_cycles = payload.get("max_cycles")
+        auto_route = bool(payload.get("auto_route", requested_cycles is None))
         if write_mode:
             max_cycles = 1
             max_tokens = int(payload.get("max_tokens", 256))
@@ -2476,7 +2512,7 @@ class Handler(BaseHTTPRequestHandler):
             max_cycles = routing.cycles
             max_tokens = routing.max_tokens
         else:
-            max_cycles = int(payload.get("max_cycles", 2))
+            max_cycles = max(1, int(requested_cycles or 2))
             max_tokens = int(payload.get("max_tokens", 256))
 
         pipeline = ThreeLoopPipeline(

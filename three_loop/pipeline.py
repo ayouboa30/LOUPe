@@ -402,7 +402,16 @@ class ThreeLoopPipeline:
                 # so it is distilled once here rather than re-prefilled in
                 # full each time. ``last_solution`` keeps the verbatim answer:
                 # the user sees the full text, only the model sees the digest.
-                if self.config.context_agent_enabled:
+                # Only a *later* cycle ever reads the distilled turn back
+                # (``history`` is consumed by ``history.render`` at the top of
+                # the next iteration and nowhere after the loop). On the last
+                # allowed cycle there is no such reader, so the distillation
+                # call would be a full model round trip whose output is
+                # discarded - about 1.7 s locally, and the entire cost of the
+                # run's second call when max_cycles is 1, which is the default
+                # for the Flash profiles.
+                is_last_cycle = cycle >= self.config.max_cycles
+                if self.config.context_agent_enabled and not is_last_cycle:
                     _raise_if_cancelled(cancel_requested)
                     distilled = await self._context_agent.distill(
                         writer,

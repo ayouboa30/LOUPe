@@ -138,6 +138,97 @@ def _physical_cores() -> int:
     return max(1, logical // 2)
 
 
+def _inference_threads() -> int:
+    """Thread count for a server that runs prefill and decode on one setting.
+
+    llama-cpp-python takes two counts because the phases are bound by
+    different resources, but Ollama's API exposes a single ``num_thread``, so
+    the two have to be traded off against each other.
+
+    Measured on a Ryzen 7 5825U (8 physical / 16 logical) with Qwen3 1.7B
+    Q4_K_M, ~1500-token prompt and 330 generated tokens, medians of 5
+    interleaved trials:
+
+        threads   prefill   decode   total
+              8    11.82s   18.26s  30.41s
+             10    11.05s   17.56s  28.75s
+             12    10.08s   19.30s  29.29s
+             14     9.53s   21.59s  31.12s
+             16 *    9.09s   22.35s  31.37s     (* previous default)
+
+    The two phases move in opposite directions, exactly as the roofline
+    predicts: prefill is compute-bound and keeps improving with threads, while
+    decode is memory-bandwidth-bound and degrades once SMT siblings start
+    contending for the same bandwidth.
+
+    The robust result is the decode penalty at the full logical count: two
+    independent runs measured it at +27% and +29% against the 10-12 band. The
+    *totals* for 8, 10 and 12 are within run-to-run noise of one another
+    (per-config spread was ~4s), so this picks the middle of that band rather
+    than claiming 10 is precisely optimal. What it must not do is use every
+    logical core, which is what ``os.cpu_count()`` did.
+
+    ``LOUPE_NUM_THREADS`` overrides it, since the balance shifts with the
+    prompt/generation ratio and with CPUs that have no SMT at all.
+    """
+
+    override = os.environ.get("LOUPE_NUM_THREADS", "").strip()
+    if override:
+        try:
+            if (value := int(override)) > 0:
+                return value
+        except ValueError:
+            pass
+    physical = _physical_cores()
+    logical = os.cpu_count() or physical
+    # Above physical cores to keep part of the prefill gain, well below the
+    # logical count to avoid the decode collapse. On a CPU without SMT
+    # (physical == logical) this clamps back to the core count.
+    return max(1, min(logical, round(physical * 1.25)))
+
+
+#: Chars per token used to bound a prompt before sending it. Measured ~3.95 on
+#: this app's French prose; JSON and code tokenize worse, so 3.0 deliberately
+#: over-estimates. Over-estimating only costs a slightly early error message,
+#: while under-estimating brings back the silent truncation this guards.
+_CHARS_PER_TOKEN = 3.0
+
+
+def _context_window() -> int:
+    """Context window for the Ollama path, decided once per process.
+
+    Deliberately *not* per request. Ollama re-allocates the KV cache when
+    ``num_ctx`` changes, so varying it per call would risk a model reload
+    between requests - far more expensive than the larger window it saves.
+
+    Size has no measurable effect on speed: same prompt at 2048 / 4096 / 8192
+    measured 27.74 / 28.09 / 28.42 s, i.e. inside run-to-run noise. It only
+    costs memory (~112 KB per token of KV cache for Qwen3 1.7B, so ~0.9 GB at
+    8192), which is why this scales with the RAM actually present instead of
+    picking one number for every machine.
+
+    ``LOUPE_NUM_CTX`` overrides it.
+    """
+
+    override = os.environ.get("LOUPE_NUM_CTX", "").strip()
+    if override:
+        try:
+            if (value := int(override)) >= 512:
+                return value
+        except ValueError:
+            pass
+    try:
+        import psutil
+
+        total_gb = psutil.virtual_memory().total / (1024**3)
+    except Exception:
+        total_gb = 8.0
+    # 4096 was the previous fixed value and stays the floor for small
+    # machines; a roomier window on a normal desktop is what keeps a long
+    # document or a multi-turn conversation from being silently cut.
+    return 8192 if total_gb >= 12 else 4096
+
+
 class LlamaCppBackend(SharedLLMBackend):
     """Local backend using one shared model and llama.cpp's own KV prefix reuse.
 
@@ -484,7 +575,11 @@ class OllamaBackend(SharedLLMBackend):
         # ``None`` preserves Ollama's model default. A bool is sent at the
         # top-level API field, which is where Ollama reads this capability.
         self.thinking = thinking
-        self._num_thread = os.cpu_count() or 4
+        # Not os.cpu_count(): every logical core measured *slower* end to end
+        # than a count just above the physical cores, because decode loses
+        # more to SMT contention than prefill gains. See _inference_threads.
+        self._num_thread = _inference_threads()
+        self._num_ctx = _context_window()
 
     async def _complete(
         self,
@@ -498,20 +593,40 @@ class OllamaBackend(SharedLLMBackend):
         import urllib.request
 
         # keep_alive avoids paying the ~5-10s model (re)load cost on every
-        # call; num_thread pins Ollama to all detected CPU cores instead of
-        # a conservative default; num_ctx is capped to what our prompts
-        # actually need instead of the model's much larger native context
-        # (e.g. 32k), which otherwise inflates the KV-cache allocation and
-        # prefill cost on every single call.
+        # call; num_thread and num_ctx are both resolved once per process
+        # (see _inference_threads / _context_window) rather than per request,
+        # so Ollama keeps one stable allocation instead of reloading the model
+        # whenever a request happens to be a different size.
+        messages = _messages(prompt, system_prompt)
+        # Ollama silently truncates a prompt that does not fit, and it drops
+        # the *front* of it: measured, a ~4300-token prompt sent with a 2048
+        # window reached the model as 1026 tokens, the opening marker was gone
+        # and the model confidently answered about something else. This app's
+        # prompt layout puts the protocol and the JSON schema first precisely
+        # because they are stable, so front-truncation removes exactly the
+        # instructions that make the reply parseable. Failing loudly here is
+        # the same contract LlamaCppBackend already enforces.
+        estimated_prompt_tokens = int(
+            sum(len(m.get("content", "")) for m in messages) / _CHARS_PER_TOKEN
+        )
+        reserved = max_tokens or 0
+        if estimated_prompt_tokens + reserved > self._num_ctx:
+            raise ValueError(
+                f"prompt trop long (~{estimated_prompt_tokens} tokens + "
+                f"{reserved} de reponse) pour la fenetre de contexte du modele "
+                f"({self._num_ctx} tokens); raccourcis la question, l'historique "
+                "ou les documents joints."
+            )
+
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": _messages(prompt, system_prompt),
+            "messages": messages,
             "stream": False,
             "keep_alive": self.keep_alive,
             "options": {
                 "temperature": temperature,
                 "num_thread": self._num_thread,
-                "num_ctx": 4096,
+                "num_ctx": self._num_ctx,
             },
         }
         if max_tokens is not None:

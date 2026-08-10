@@ -7,6 +7,13 @@ modèle réellement utilisé. Aucune n'est reprise d'un benchmark tiers.
 32 Go DDR4-3200 dual-channel, Qwen2.5-Coder-3B-Instruct **déjà en Q4_K_M**
 (1,79 Gio, 4,99 bits/poids), llama-cpp-python.
 
+> **Attention en lisant les §1 à §7.** Ils ont été mesurés sur
+> Qwen2.5-Coder-3B via `llama-cpp-python`. L'application sert aujourd'hui
+> **Qwen3 1.7B/4B via le serveur Ollama**, qui est un modèle plus petit et un
+> chemin de code différent. Le §8 reprend les mesures sur ce chemin-là, et
+> **contredit le §2 sur le nombre de threads** : les conclusions d'un banc
+> d'essai ne se transportent pas d'un modèle à l'autre.
+
 ---
 
 ## 1. Où part réellement le temps
@@ -487,6 +494,143 @@ reformule au lieu de recopier, donc peu de n-grammes devinés sont acceptés.
 **Quantifier plus bas (Q3).** ~20 % de bande passante gagnée contre une
 perte nette sur du raisonnement technique. Mauvais échange comparé au
 changement de taille de modèle, qui donne 3× pour une perte comparable.
+
+## 8. Le chemin réellement utilisé : Qwen3 via Ollama
+
+Les sections précédentes réglaient `llama-cpp-python`. Or l'interface
+sélectionne **Ollama** dès qu'un profil Qwen3 est installé, et ce backend
+avait gardé des réglages qui n'avaient jamais été mesurés sur lui.
+
+**Banc d'essai** — même machine, `qwen3:1.7b-flash` (Q4_K_M, 1,36 Go), API
+Ollama, prompt ~1420 tokens, 330 tokens générés, médianes de 5 tirages
+entrelacés (round-robin, pour qu'une dérive machine touche toutes les
+configurations également).
+
+### Nombre de threads — le §2 ne se transporte pas
+
+| threads | prefill | décodage | **total** |
+|---|---|---|---|
+| 8 | 11,82 s | 18,26 s | 30,41 s |
+| **10** | 11,05 s | **17,56 s** | **28,75 s** |
+| 12 | 10,08 s | 19,30 s | 29,29 s |
+| 14 | 9,53 s | 21,59 s | 31,12 s |
+| 16 *(ancien défaut)* | **9,09 s** | 22,35 s | 31,37 s |
+
+Les deux phases vont en sens **opposé**, comme le prédit le roofline : le
+prefill est borné calcul et continue de gagner avec les threads, le décodage
+est borné bande passante et se dégrade dès que les jumeaux SMT se disputent
+la même mémoire.
+
+Le §2 concluait « le décodage plafonne dès 4 threads ». **C'est faux sur ce
+modèle** : il continue de s'améliorer jusqu'à ~10-12. Le 1.7B est deux fois
+plus petit que le 3B, donc moins étranglé par la bande passante et plus
+sensible au calcul. Une conclusion de perf est attachée à son modèle.
+
+**Ce qui est robuste** : la pénalité de décodage à 16 threads, mesurée deux
+fois indépendamment (+27 % et +29 % contre la bande 10-12). **Ce qui ne
+l'est pas** : l'écart entre 8, 10 et 12, dont les totaux se recouvrent
+(dispersion ~4 s par configuration). `_inference_threads()` vise donc le
+milieu de cette bande (1,25 × cœurs physiques, borné aux cœurs logiques)
+sans prétendre que 10 soit exactement l'optimum. Le point qui compte est de
+**ne pas utiliser tous les cœurs logiques**, ce que faisait `os.cpu_count()`.
+
+Réglable par `LOUPE_NUM_THREADS`, l'équilibre dépendant du rapport
+prompt/génération et des CPU sans SMT.
+
+### Taille de la fenêtre de contexte — aucun effet sur la vitesse
+
+| `num_ctx` | total |
+|---|---|
+| 2048 | 27,74 s |
+| 4096 | 28,09 s |
+| 8192 | 28,42 s |
+
+Écarts dans le bruit : la fenêtre ne coûte que de la **mémoire**
+(~112 Ko de cache KV par token sur Qwen3 1.7B, soit ~0,9 Go à 8192), pas du
+temps. Elle est donc choisie sur la RAM disponible, **une fois par
+processus** — la faire varier par requête forcerait Ollama à réallouer son
+cache KV, donc à recharger le modèle entre deux requêtes.
+
+### Dépassement de contexte — silencieux et destructeur
+
+Un prompt d'environ 4300 tokens envoyé avec une fenêtre de 2048 :
+
+| | |
+|---|---|
+| tokens réellement vus par le modèle | **1026** |
+| marqueur placé au tout début, retrouvé ? | **non** |
+| réponse | inventée avec assurance |
+
+Ollama **tronque par l'avant**, sans erreur ni avertissement. Or l'agencement
+du §3 place en tête ce qui est le plus stable : le protocole et le schéma
+JSON. La troncature retire donc exactement les instructions qui rendent la
+réponse analysable. `LlamaCppBackend` refusait déjà ce cas avec une erreur
+claire ; `OllamaBackend` le fait désormais aussi, avec une estimation
+volontairement pessimiste (3,0 caractères/token contre ~3,95 mesuré).
+
+### Un appel de modèle entier qui ne servait à rien
+
+L'agent de contexte distille la réponse du cycle avant de l'ajouter à
+l'historique. Mais cet historique n'est relu que par le **cycle suivant**
+(`history.render`, en tête de l'itération d'après) et par personne après la
+boucle. Au dernier cycle autorisé, cet appel produisait donc un résultat
+immédiatement jeté.
+
+Ce n'est pas un cas marginal : depuis que les cycles suivent le niveau de
+réflexion, **1 cycle est le défaut** des profils Flash — l'appel gaspillé
+représentait alors la moitié des appels du run.
+
+### Cycles : le choix de l'utilisateur était ignoré
+
+`auto_route` valait `True` par défaut et **écrasait** le `max_cycles` envoyé
+par l'interface : le sélecteur de cycles de la barre de message ne pouvait
+rien changer, et un prompt long et technique déclenchait silencieusement
+3 cycles complets. Un `max_cycles` explicite fait désormais autorité ;
+l'heuristique ne sert plus qu'aux appelants qui n'expriment aucun choix
+(CLI, compagnon de bureau).
+
+### Vérification bout-en-bout — et ce qu'elle ne prouve pas
+
+Les mesures ci-dessus isolent une phase. Reste à voir ce qu'un utilisateur
+attend réellement. Le vrai `ThreeLoopPipeline`, 1 cycle, profil Flash,
+médianes de 3 tirages :
+
+| configuration | question courte | tâche de code |
+|---|---|---|
+| avant (16 threads, agent contexte au dernier cycle) | 8,92 s | 21,19 s |
+| threads seuls (10 threads) | 8,85 s *(−0,7 %)* | 22,85 s *(**+7,9 %**)* |
+| **après (10 threads + agent contexte sauté)** | **3,78 s (−57,6 %)** | **16,66 s (−21,3 %)** |
+
+**Le gain réel vient de l'appel supprimé, pas des threads.** Sur la tâche de
+code, le changement de threads seul mesure même *plus lent*.
+
+Il ne faut pas en conclure que le réglage des threads est mauvais : il faut
+conclure que **ce banc d'essai ne peut pas trancher cette question-là**. La
+dispersion à configuration constante y est de 20,5 à 28,5 s, soit ±20 %,
+alors que l'effet cherché vaut ~5 %. La cause est structurelle : en bout-en-bout
+le modèle décide lui-même de la longueur de sa réponse, donc le nombre de
+tokens générés — et donc le temps — change à chaque tirage. Le banc isolé
+fixait `num_predict=330` et obtenait exactement 330 tokens à chaque fois,
+ce qui est précisément pourquoi il pouvait mesurer 5 %.
+
+Le réglage des threads est donc conservé sur la foi des mesures par phase
+(pénalité de décodage reproduite deux fois à +27 % et +29 %, effet physique
+attendu), **pas** sur la foi d'un gain bout-en-bout, qui n'est pas
+démontré. `LOUPE_NUM_THREADS` permet de revenir en arrière sans rebuild.
+
+Le gain de l'appel supprimé, lui, est net dans les deux formes de tâche : il
+retire un aller-retour complet sur les deux que faisait un run à 1 cycle,
+d'où −58 % quand la réponse est courte et −21 % quand elle est longue (le
+débat pèse alors davantage face à la distillation).
+
+### Routage à deux niveaux étendu à Ollama
+
+Le §1 bis fait tourner les rôles de support sur le plus petit modèle
+installé — mais uniquement pour `LlamaCppBackend`, donc **jamais sur le
+chemin par défaut**. Un utilisateur en profil « Élevé » / « Très élevé »
+(Qwen3 4B) fait désormais produire ses résumés de contexte et de recherche
+par le profil 1.7B Flash. Sans effet pour qui est déjà en 1.7B : mieux vaut
+un seul modèle résident que deux.
 
 ## Reproduire les mesures
 
