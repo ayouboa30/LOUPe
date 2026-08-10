@@ -9,7 +9,15 @@ description = "Asynchronous three-agent debate framework for code and mathematic
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-dependencies = []
+# Pillow is imported unconditionally by six modules (assistant_actions,
+# bubble, documents, native_widget, prompt_window, screen_capture), and
+# assistant_actions.py sits on server.py's own import chain - so this is not
+# actually optional despite dependencies previously being declared empty.
+# That gap only showed up building the Linux bundle: PyInstaller has nothing
+# to detect for an import a venv never had installed, and the app crashed at
+# startup with ModuleNotFoundError: No module named 'PIL'. Windows never hit
+# it only because Pillow happened to already be present in that dev venv.
+dependencies = ["pillow>=10.0"]
 classifiers = [
     "License :: Other/Proprietary License",
     "Operating System :: OS Independent",

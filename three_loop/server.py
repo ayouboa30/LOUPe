@@ -50,7 +50,7 @@ from .coding_cli_backends import (
 from .difficulty_router import analyze_difficulty
 from .compact import compact_text
 from .documents import extract_text as extract_document_text
-from .eye_tracker import get_eye_tracker
+from .eye_tracker import dependencies_available as eye_tracking_available, get_eye_tracker
 from .igpu import ensure_server as ensure_igpu_server, probe as igpu_probe
 from .update_check import check_for_update
 from .gmail import (
@@ -1135,6 +1135,10 @@ class Handler(BaseHTTPRequestHandler):
                     },
                     "igpu": igpu_probe(),
                     "research_agent": _research_agent_config(),
+                    # Import-only probe: never opens the camera, so the page
+                    # can decide whether to offer the button at all without
+                    # a permission prompt or a lit camera indicator.
+                    "eye_tracking": {"dependencies_available": eye_tracking_available()},
                 }
             )
             return
@@ -1378,6 +1382,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_v1_eye_tracking_stop(self) -> None:
         # Stop is idempotent and never fails if the optional model was absent.
+        self._drain_request_body()
         self._send_json(get_eye_tracker().stop())
 
     def _handle_v1_conversation_save(self) -> None:
@@ -1423,6 +1428,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_v1_run_cancel(self, request_path: str) -> None:
         """Request cooperative cancellation of one active streamed run."""
 
+        self._drain_request_body()
         parts = [unquote(part) for part in request_path.strip("/").split("/")]
         if len(parts) != 5 or parts[:3] != ["api", "v1", "runs"] or parts[4] != "cancel":
             self._send_json({"error": "Route d’arrêt invalide."}, status=404)
@@ -1569,6 +1575,31 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"Espace scientifique indisponible: {exc}"}, status=500)
             return
         self._send_json({"error": "Route API v1 introuvable."}, status=404)
+
+    def _drain_request_body(self) -> None:
+        """Read and discard a request body for a route that needs none.
+
+        Some POST routes take no parameters (stop/cancel), but this app's own
+        browser client still sends one (``body: "{}"``) on both. With
+        ``protocol_version = "HTTP/1.1"`` the connection is kept alive, and
+        writing a response before the client's bytes are consumed leaves them
+        sitting in the socket buffer - the next request on that connection is
+        then parsed starting with those leftover bytes and fails or reads
+        garbage. Found by auditing every POST handler for this exact gap:
+        ``_handle_v1_eye_tracking_stop`` and ``_handle_v1_run_cancel`` were
+        the only two missing it.
+
+        Unlike ``_read_json_payload``, a body is optional here, so this never
+        sends an error response - nothing to parse must never become a
+        failure for a route whose contract doesn't need a payload.
+        """
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            try:
+                self.rfile.read(length)
+            except OSError:
+                pass
 
     def _read_json_payload(self, *, max_bytes: int = 5_000_000) -> dict[str, Any] | None:
         length = int(self.headers.get("Content-Length", 0))

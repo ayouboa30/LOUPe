@@ -99,6 +99,15 @@ if (Test-Path -LiteralPath $staging) {
 
 $buildErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
+# Note on --collect-data mediapipe / cv2 below: eye tracking needs
+# mediapipe's *data* files, not just its code. Without them the bundle still
+# imports mediapipe fine (its 68 MB native extension is collected
+# automatically), so the feature looked available and then failed the moment
+# it was clicked: "The path does not exist: ...\_internal\mediapipe\
+# modules\...". --collect-data pulls in the .tflite models and .binarypb
+# graphs FaceMesh loads at construction (~29 MB, of which the face pipeline
+# uses ~7 MB); --collect-data rather than --collect-all avoids re-collecting
+# the package's code and binaries a second time.
 & python -m PyInstaller `
   --noconfirm `
   --clean `
@@ -118,6 +127,8 @@ $ErrorActionPreference = "Continue"
   --hidden-import winrt.windows.media.speechrecognition `
   --collect-all pypdf `
   --hidden-import psutil `
+  --collect-data mediapipe `
+  --collect-data cv2 `
   desktop_app.py
 
 $pyInstallerExitCode = $LASTEXITCODE

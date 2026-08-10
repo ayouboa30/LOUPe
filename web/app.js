@@ -1932,6 +1932,7 @@ async function loadConfig() {
   // otherwise an initial race could silently use the demo backend.
   void loadGmailStatus();
   void checkForUpdate();
+  applyEyeTrackingAvailability();
 }
 
 // ---------------------------------------------------------------- update banner
@@ -2700,6 +2701,35 @@ function requestInstantHelp(reason = "") {
   }
 }
 
+// Whether OpenCV/MediaPipe are importable on this machine - probed once in
+// /api/config (never touches the camera; see three_loop/eye_tracker.py's
+// dependencies_available()). This is what the start button's disabled state
+// should track when no tracking session is running; while one is running,
+// runningEyeTracking() below is authoritative instead.
+function eyeTrackingDependenciesAvailable() {
+  return Boolean(state.config?.eye_tracking?.dependencies_available);
+}
+
+// Sets the button's availability from config alone, before any status has
+// ever been polled. The HTML ships with the start button hard-disabled and a
+// neutral "vérification…" label specifically so this is the first thing to
+// resolve that state - a button that starts disabled and is never
+// programmatically re-enabled is indistinguishable from a dead one.
+function applyEyeTrackingAvailability() {
+  if (!eyeTrackingStartButton) return;
+  const available = eyeTrackingDependenciesAvailable();
+  eyeTrackingStartButton.disabled = !available;
+  eyeTrackingStartButton.title = available
+    ? ""
+    : "Suivi optionnel non installé sur cette machine (pip install \"3loop[eye-tracking]\").";
+  eyeTrackingStartButton.textContent = available
+    ? "Suivi Python des yeux"
+    : "Suivi Python des yeux · non installé";
+  if (!available && helpStatus) {
+    helpStatus.textContent = "Suivi Python des yeux non installé sur cette machine. Aide manuelle disponible.";
+  }
+}
+
 function renderEyeTrackingStatus(status) {
   if (!helpStatus || !status) return;
   const state = String(status.state || "unknown");
@@ -2713,8 +2743,20 @@ function renderEyeTrackingStatus(status) {
   };
   helpStatus.textContent = labels[state] || String(status.message || "État du suivi inconnu.");
   helpStatus.className = state === "blocked" ? "hint warn" : state === "unavailable" ? "hint warn" : "hint";
-  if (eyeTrackingStartButton) eyeTrackingStartButton.hidden = Boolean(status.available && state !== "stopped");
-  if (eyeTrackingStopButton) eyeTrackingStopButton.hidden = !status.available || state === "stopped";
+  const running = Boolean(status.available && state !== "stopped");
+  // Both buttons' `hidden` were already exact complements of `running`; the
+  // actual bug was `disabled`, which neither this function nor the HTML's
+  // initial markup ever cleared, leaving whichever button was visible
+  // unusable. Both are now driven from the same `running` value that decides
+  // visibility, so a visible button is always a clickable one.
+  if (eyeTrackingStartButton) {
+    eyeTrackingStartButton.hidden = running;
+    if (!running) eyeTrackingStartButton.disabled = !eyeTrackingDependenciesAvailable();
+  }
+  if (eyeTrackingStopButton) {
+    eyeTrackingStopButton.hidden = !running;
+    eyeTrackingStopButton.disabled = !running;
+  }
   if (state === "blocked" && Number(status.event_seq || 0) > lastEyeTrackingEvent) {
     lastEyeTrackingEvent = Number(status.event_seq || 0);
     requestInstantHelp("Blocage probable détecté par le modèle local. Décris maintenant ce qui te bloque.");
@@ -2727,7 +2769,25 @@ async function pollEyeTrackingStatus() {
     const status = await response.json();
     if (response.ok || status) renderEyeTrackingStatus(status);
   } catch {
-    if (helpStatus) helpStatus.textContent = "Suivi Python indisponible. L’aide manuelle reste active.";
+    // A lost connection used to leave the panel in whatever state it was
+    // last rendered in - if that was mid-tracking, the stop button stayed
+    // visible (and, per the bug above, permanently disabled) with no way
+    // back to a usable control. Stop polling and hand control back to
+    // whichever button reflects what we can still be sure of: manual help.
+    clearInterval(eyeTrackingPoll);
+    eyeTrackingPoll = null;
+    if (helpStatus) {
+      helpStatus.textContent = "Suivi Python indisponible (connexion perdue). L’aide manuelle reste active.";
+      helpStatus.className = "hint warn";
+    }
+    if (eyeTrackingStopButton) {
+      eyeTrackingStopButton.hidden = true;
+      eyeTrackingStopButton.disabled = true;
+    }
+    if (eyeTrackingStartButton) {
+      eyeTrackingStartButton.hidden = false;
+      eyeTrackingStartButton.disabled = !eyeTrackingDependenciesAvailable();
+    }
   }
 }
 

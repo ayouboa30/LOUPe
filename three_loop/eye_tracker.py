@@ -137,8 +137,21 @@ class EyeTrackingService:
             self._status = EyeTrackingStatus(state="unavailable", message=message, updated_at=time.time())
         return self.status()
 
-    def observe(self, gaze: tuple[float, float] | None, confidence: float, *, timestamp: float | None = None) -> dict[str, Any]:
-        """Consume one normalized gaze sample and update dwell/help state."""
+    def observe(
+        self,
+        gaze: tuple[float, float] | None,
+        confidence: float,
+        *,
+        timestamp: float | None = None,
+        message: str | None = None,
+    ) -> dict[str, Any]:
+        """Consume one normalized gaze sample and update dwell/help state.
+
+        ``message`` lets the caller distinguish *why* there is no gaze: a
+        transient camera read failure and "no face in frame" used to collapse
+        onto the identical sentence, which was undiagnosable by the user -
+        the fix in ``_run`` is what actually makes these two cases distinct.
+        """
 
         now = float(timestamp if timestamp is not None else time.monotonic())
         confidence = max(0.0, min(1.0, float(confidence)))
@@ -152,7 +165,7 @@ class EyeTrackingService:
                     available=self._status.available,
                     backend=self._status.backend,
                     confidence=confidence,
-                    message="Visage/iris non détecté : utilise l'aide manuelle si nécessaire.",
+                    message=message or "Aucun visage détecté : place-toi face à la caméra.",
                     event_seq=self._status.event_seq,
                     updated_at=time.time(),
                 )
@@ -166,9 +179,25 @@ class EyeTrackingService:
                 self._stable_since = now
                 self._status = EyeTrackingStatus(
                     state="tracking", available=True, backend=self._status.backend,
-                    confidence=confidence, gaze=point, updated_at=time.time(),
+                    confidence=confidence, gaze=point,
+                    # Preserving event_seq here matters: this branch replaces
+                    # self._status *before* the dwell/help computation below
+                    # reads it back via self._status.event_seq. Omitting it
+                    # let the dataclass default (0) silently overwrite the
+                    # counter on every unstable sample - confirmed by direct
+                    # reproduction: a full dwell-then-move-then-dwell cycle
+                    # produced 0 -> 1 -> 0 -> 1, never climbing past 1, which
+                    # made the frontend's strict `event_seq > last` check
+                    # (app.js) fire on the first blocked event of a session
+                    # and never again.
+                    event_seq=self._status.event_seq,
+                    updated_at=time.time(),
                 )
-            dwell = max(0.0, now - (self._stable_since or now))
+            # `self._stable_since` is a real, meaningful value at exactly
+            # 0.0 (e.g. a test using timestamp=0.0, or a monotonic clock
+            # that has just been reset), and `x or now` treats 0.0 as falsy
+            # the same as None - collapsing dwell to 0 forever in that case.
+            dwell = max(0.0, now - (self._stable_since if self._stable_since is not None else now))
             blocked = dwell >= self.dwell_seconds
             event_seq = self._status.event_seq
             help_requested = self._status.help_requested
@@ -188,6 +217,14 @@ class EyeTrackingService:
             return self._status.as_dict()
 
     def _run(self, cv2: Any, mp: Any) -> None:
+        # Consecutive camera.read() failures over this many attempts (~2.4s
+        # at the 0.08s retry pace below) is treated as the camera having been
+        # lost - unplugged, or taken over by another application - rather
+        # than a one-frame glitch. Retrying forever on a genuinely dead
+        # camera left the status stuck on a "no face" message that told the
+        # user to look at the screen, when the real problem was hardware.
+        camera_failure_limit = 30
+        consecutive_camera_failures = 0
         face_mesh = None
         try:
             face_mesh = mp.solutions.face_mesh.FaceMesh(
@@ -199,14 +236,22 @@ class EyeTrackingService:
                     break
                 ok, frame = camera.read()
                 if not ok:
-                    self.observe(None, 0.0)
+                    consecutive_camera_failures += 1
+                    if consecutive_camera_failures >= camera_failure_limit:
+                        self._set_unavailable(
+                            "Caméra locale perdue : vérifie qu'elle est branchée et "
+                            "qu'aucune autre application ne l'utilise."
+                        )
+                        break
+                    self.observe(None, 0.0, message="Caméra locale momentanément indisponible…")
                     time.sleep(0.08)
                     continue
+                consecutive_camera_failures = 0
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 result = face_mesh.process(frame)
                 landmarks = result.multi_face_landmarks[0].landmark if result.multi_face_landmarks else None
                 if not landmarks or len(landmarks) < 478:
-                    self.observe(None, 0.0)
+                    self.observe(None, 0.0, message="Aucun visage détecté : place-toi face à la caméra.")
                     continue
                 # MediaPipe iris landmarks: left 468-472, right 473-477.
                 iris = [landmarks[index] for index in range(468, 478)]
@@ -236,3 +281,45 @@ _EYE_TRACKER = EyeTrackingService()
 
 def get_eye_tracker() -> EyeTrackingService:
     return _EYE_TRACKER
+
+
+#: Model assets FaceMesh loads at construction time, relative to the mediapipe
+#: package root. They are plain data files, not Python modules, so a frozen
+#: build that collects the package's code and its native extension can still
+#: be missing these entirely.
+_FACE_MESH_ASSETS = (
+    "modules/face_landmark/face_landmark_with_attention.tflite",
+    "modules/face_detection/face_detection_short_range.tflite",
+)
+
+
+def dependencies_available() -> bool:
+    """Whether eye tracking can actually run, without touching a camera.
+
+    ``start()`` is the only place that opens the camera, and does so lazily
+    on purpose (no permission prompt or camera-in-use light before the user
+    asks for it). This is the counterpart for the opposite need: the UI wants
+    to know, on every page load, whether to offer the button at all - and
+    must not turn the camera on just to answer that.
+
+    Importability alone is *not* the right question, which a packaged build
+    proved: PyInstaller collected mediapipe's modules and its 68 MB native
+    extension, so ``import mediapipe`` succeeded, but none of its ``.tflite``
+    model files were bundled. The button therefore offered a feature that
+    failed the moment it was clicked ("The path does not exist:
+    ...\\_internal\\mediapipe\\modules\\..."). Checking the assets the face
+    mesh actually loads is what makes this probe honest in a frozen build.
+    """
+
+    try:
+        import cv2  # noqa: F401
+        import mediapipe
+    except ImportError:
+        return False
+    try:
+        from pathlib import Path
+
+        root = Path(mediapipe.__file__).resolve().parent
+    except (AttributeError, OSError, TypeError):
+        return False
+    return all((root / asset).is_file() for asset in _FACE_MESH_ASSETS)
