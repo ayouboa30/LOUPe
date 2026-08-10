@@ -341,8 +341,8 @@ class LatentDebateCoordinator:
                     "ou désactive le mode Thinking."
                 ) from retry_error
 
-    @staticmethod
     def _build_cli_agent_prompt(
+        self,
         task: str,
         *,
         kind: TaskKind,
@@ -363,6 +363,16 @@ class LatentDebateCoordinator:
         instead of terse protocol markers.
         """
 
+        # The lazy-fields saving was previously local-only: this template was
+        # a staticmethod that never saw the flag, so every CLI agent was still
+        # asked for `heuristic`, `critique` and three prose `rationale`s -
+        # exactly the fields nobody reads unless the side panel is open. That
+        # matters more here than locally: a CLI agent's latency tracks how
+        # much it writes (measured on OpenCode: 51 s for a 3535-character
+        # reply), and unlike prompt size or reasoning effort - both measured
+        # to make no usable difference - the amount of text requested is
+        # entirely under LOUPe's control.
+        lazy = self.lazy_debate_fields
         instruction = (
             "Tu dois mener un debat interne a trois roles (heuristique, "
             "critique, redacteur) puis produire une reponse finale, en JSON "
@@ -374,18 +384,28 @@ class LatentDebateCoordinator:
             "Sois concis, n'emets aucune reflexion intermediaire. "
             '"final_solution" ne doit contenir que la reponse elle-meme: ni '
             "noms de role, ni liste de votes, ni commentaire sur ce format.\n"
-            # Same token-budget reasoning as the local template: only
-            # final_solution is ever shown to the user.
-            'Garde "heuristic", "critique" et chaque "rationale" a une '
-            'phrase courte (15 mots maximum). Consacre le volume a '
-            '"final_solution".\n'
-            f"Cycle {cycle}. Reponds dans la meme langue que la tache "
+            + (
+                "Ne rends compte ni du debat ni de sa justification : seuls "
+                'comptent "final_solution" et les votes.\n'
+                if lazy
+                else 'Garde "heuristic", "critique" et chaque "rationale" a une '
+                'phrase courte (15 mots maximum). Consacre le volume a '
+                '"final_solution".\n'
+            )
+            + f"Cycle {cycle}. Reponds dans la meme langue que la tache "
             "ci-dessous. Renvoie exactement cet objet JSON, rien d'autre:\n"
-            '{"heuristic":"une phrase", "critique":"une phrase",\n'
-            '"final_solution":"reponse complete", "votes":[\n'
-            '{"role":"heuristic","resolved":true,"confidence":0.0,"rationale":"une phrase"},\n'
-            '{"role":"critic","resolved":true,"confidence":0.0,"rationale":"une phrase"},\n'
-            '{"role":"writer","resolved":true,"confidence":0.0,"rationale":"une phrase"}]}'
+            + (
+                '{"final_solution":"reponse complete", "votes":[\n'
+                '{"role":"heuristic","resolved":true,"confidence":0.0},\n'
+                '{"role":"critic","resolved":true,"confidence":0.0},\n'
+                '{"role":"writer","resolved":true,"confidence":0.0}]}'
+                if lazy
+                else '{"heuristic":"une phrase", "critique":"une phrase",\n'
+                '"final_solution":"reponse complete", "votes":[\n'
+                '{"role":"heuristic","resolved":true,"confidence":0.0,"rationale":"une phrase"},\n'
+                '{"role":"critic","resolved":true,"confidence":0.0,"rationale":"une phrase"},\n'
+                '{"role":"writer","resolved":true,"confidence":0.0,"rationale":"une phrase"}]}'
+            )
         )
         return build_cli_agent_prompt(
             instruction=instruction,

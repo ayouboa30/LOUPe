@@ -717,6 +717,73 @@ clôture markdown, clés étrangères (`reponse`, `answer`), prose seule, JSON
 tronqué, sauts de ligne bruts dans une chaîne. **Les dix rendent la bonne
 réponse.** Aucun cas ne montre du JSON brut à l'utilisateur.
 
+## 11. Agents CLI : ce qui accélère, et surtout ce qui n'accélère pas
+
+Codex et OpenCode prenaient 16 à 25 s par appel. Décomposition avant de
+toucher quoi que ce soit (3 tirages, médianes) :
+
+| | démarrage du process | session + aller-retour | coût du prompt |
+|---|---|---|---|
+| codex | 0,05 s | ~20 s | **−3,5 s** (dans le bruit) |
+| opencode | 0,79 s | ~8 s | +5,4 s |
+
+Le démarrage du processus est négligeable, et **allonger le prompt de LOUPe
+ne coûte rien chez codex**. L'essentiel est du service distant.
+
+### Options testées — toutes négatives
+
+| option | résultat |
+|---|---|
+| codex `model_reasoning_effort=low` | 20,06 s contre 20,47 s |
+| codex `model_reasoning_effort=none` | 19,47 s |
+| codex `--ephemeral --skip-git-repo-check` | 21,25 s (plus lent) |
+| opencode `--pure` (sans plugins) | 52,81 s contre 51,26 s |
+
+**Aucune ne sort du bruit.** L'hypothèse de départ — « l'effort de
+raisonnement explique les 20 s » — est fausse : de `medium` à `none` il n'y a
+que 5 %, alors que la dispersion entre tirages atteint 16 à 22 s.
+
+Un piège mérite d'être noté, parce qu'il donne exactement l'illusion d'un
+gain : `model_reasoning_effort=minimal` mesurait **8,35 s au lieu de 22,97 s**
+— mais avec une réponse **vide**. L'API la refuse (`400 : 'minimal' is not
+supported ... valeurs acceptées : none, low, medium, high, xhigh, max`).
+C'était un chemin d'erreur rapide, pas une génération rapide. D'où la règle
+suivie ici : **jamais de temps sans la réponse à côté.**
+
+### Ce qui marche : ne pas demander ce que personne ne lit
+
+Le mode paresseux (§« Ce qui survit à la mesure ») supprime `heuristic`,
+`critique` et les `rationale`. Il était appliqué au chemin local… mais le
+gabarit CLI était une `@staticmethod` qui ne recevait jamais le drapeau : les
+trois agents CLI produisaient donc **toujours** le schéma complet.
+
+C'est le seul levier réellement sous le contrôle de LOUPe, et le seul qui a
+fonctionné :
+
+| opencode | temps | sortie |
+|---|---|---|
+| schéma complet (avant) | 36,46 s | 1944 car |
+| schéma paresseux (après) | **26,67 s (−26,9 %)** | 1434 car (−26,2 %) |
+
+Le gain de temps suit presque exactement la baisse du volume produit
+(−26,9 % contre −26,2 %) : c'est bien le mécanisme, pas une coïncidence.
+
+**Non validé sur codex** : ses crédits d'espace de travail ont été épuisés
+pendant ces essais, et les deux bras renvoyaient alors une erreur. Ses
+données antérieures suggèrent d'ailleurs un gain faible pour lui — 909
+caractères en 19,47 s contre 1240 en 20,47 s, soit −27 % de volume pour −5 %
+de temps seulement : sa latence est dominée par le service, pas par ce qu'il
+écrit. Attendre un gain net sur OpenCode, marginal sur Codex.
+
+### Ce qui reste possible et n'est pas fait
+
+La latence totale de ces agents n'est pas compressible côté LOUPe. En
+revanche, `subprocess.run` attend la fin du processus avant de rendre la
+main : lire leur sortie **au fil de l'eau** permettrait d'afficher la réponse
+pendant les 20 s, comme le §9 le fait pour Ollama. Les deux CLI émettent bien
+du NDJSON ligne par ligne, donc la voie est ouverte ; elle n'est pas encore
+implémentée.
+
 ## Reproduire les mesures
 
 Les scripts de mesure sont volontairement courts et autonomes ; ils sont
