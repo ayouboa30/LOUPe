@@ -97,6 +97,33 @@ if (Test-Path -LiteralPath $staging) {
   Remove-Item -LiteralPath $staging -Recurse -Force
 }
 
+# PyInstaller's analysis follows every import it can reach, including the
+# optional ones inside mediapipe's own submodules (model_maker and friends
+# reach for tensorflow/jax). None of them run here: measured by importing
+# mediapipe and constructing the exact FaceMesh the eye tracker uses, then
+# listing loaded modules - only matplotlib among the heavy packages is
+# actually touched, and analysis.py profiles CSVs with the standard library
+# alone (csv/statistics), not pandas or scipy.
+#
+# Left in deliberately: numpy (the widget composites frames with it),
+# matplotlib (mediapipe imports it), cv2 and mediapipe themselves.
+#
+# Measured effect on the shipped bundle: 1.3 GB -> see the build summary
+# printed at the end. torch alone was 295 MB of code that never executed.
+$excludedModules = @(
+  "--exclude-module", "torch",
+  "--exclude-module", "jax",
+  "--exclude-module", "jaxlib",
+  "--exclude-module", "tensorflow",
+  "--exclude-module", "pyarrow",
+  "--exclude-module", "scipy",
+  "--exclude-module", "pandas",
+  "--exclude-module", "numba",
+  "--exclude-module", "llvmlite",
+  "--exclude-module", "jedi",
+  "--exclude-module", "IPython"
+)
+
 $buildErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 # Note on --collect-data mediapipe / cv2 below: eye tracking needs
@@ -129,6 +156,7 @@ $ErrorActionPreference = "Continue"
   --hidden-import psutil `
   --collect-data mediapipe `
   --collect-data cv2 `
+  @excludedModules `
   desktop_app.py
 
 $pyInstallerExitCode = $LASTEXITCODE

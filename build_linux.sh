@@ -45,6 +45,24 @@ pyinstaller_args=(
   --workpath "$ROOT/build/3loop_linux"
   --add-data "$ROOT/web:web"
   --add-data "$ROOT/skills:skills"
+  # Same exclusions as build_exe.ps1, for the same measured reason:
+  # PyInstaller's analysis reaches optional imports inside mediapipe's
+  # submodules (tensorflow/jax) that never run. Verified by constructing the
+  # exact FaceMesh the eye tracker uses and listing loaded modules; only
+  # matplotlib among the heavy packages is touched. Keeping the two build
+  # scripts in step matters - a Linux bundle that quietly ships 300 MB of
+  # torch would undo this on the platform where downloads hurt most.
+  --exclude-module torch
+  --exclude-module jax
+  --exclude-module jaxlib
+  --exclude-module tensorflow
+  --exclude-module pyarrow
+  --exclude-module scipy
+  --exclude-module pandas
+  --exclude-module numba
+  --exclude-module llvmlite
+  --exclude-module jedi
+  --exclude-module IPython
   "$ROOT/desktop_app.py"
 )
 
