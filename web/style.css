@@ -34,6 +34,17 @@
 
 * { box-sizing: border-box; }
 
+/* The browser hides [hidden] with `display: none` from its own stylesheet,
+   which ANY author rule setting `display` silently defeats - and most
+   containers here set one. The result was visible in the running app: the
+   update banner rendered as an empty "Télécharger ×" strip, and the API key,
+   Modèle and Modèle personnalisé sections all stayed on screen while the code
+   that hides them worked correctly.
+   Declared once, globally, so the next container with a `display` rule does
+   not silently reintroduce it. `!important` is what makes it survive those
+   author rules - the intent of `hidden` is absolute. */
+[hidden] { display: none !important; }
+
 html, body {
   margin: 0;
   height: 100%;
@@ -789,6 +800,15 @@ body.side-panel-expanded .side-panel {
   border-radius: 14px;
   padding: 13px 15px;
   overflow: hidden;
+  /* .side-panel is a flex column, so these cards are flex items and default
+     to flex-shrink: 1. Once their combined height passed the panel's, every
+     card was squeezed below its content height - and `overflow: hidden` just
+     above turned that into text cut off mid-sentence, while the panel's own
+     `overflow-y: auto` never engaged because nothing overflowed it.
+     Refusing to shrink is what makes the panel scroll instead of truncating:
+     the cards keep their natural height and the overflow moves up to the
+     scrollable container where it belongs. */
+  flex-shrink: 0;
   animation: msg-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
   transition: border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
 }
