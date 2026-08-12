@@ -81,6 +81,12 @@ from .research.connectors import (
     build_search_plan,
     connector_catalog,
 )
+from .research.synthesis import (
+    build_synthesis_prompt,
+    format_sources,
+    parse_synthesis,
+    synthesis_as_note,
+)
 from .temperature import TemperatureOptimizer
 from .scrape import fetch_page
 from .web import DuckDuckGoSearchProvider, triangulate_sources
@@ -1169,6 +1175,8 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_v1_run_cancel(request_path)
         elif request_path == "/api/v1/research/search":
             self._handle_v1_research_search()
+        elif request_path == "/api/v1/research/synthesize":
+            self._handle_v1_research_synthesize()
         elif request_path == "/api/v1/research/compare":
             self._handle_v1_compare()
         elif request_path == "/api/v1/research/reviews":
@@ -1747,6 +1755,90 @@ class Handler(BaseHTTPRequestHandler):
             # the response still contains provider-level provenance.
             pass
         self._send_json(response)
+
+    def _handle_v1_research_synthesize(self) -> None:
+        """Read the retrieved abstracts and answer the question with citations.
+
+        The search endpoint above returns a list of titles; this is the step
+        that makes it a literature review. It deliberately reasons only over
+        the abstracts it is given, so every claim can be traced to a numbered
+        source the user can open, and reports what those sources leave
+        unanswered rather than filling the hole with generalities.
+        """
+
+        payload = self._read_json_payload(max_bytes=512_000)
+        if payload is None:
+            return
+        question = str(payload.get("question", "")).strip()
+        records = payload.get("records")
+        if not question:
+            self._send_json({"error": "Question de recherche manquante."}, status=400)
+            return
+        if not isinstance(records, list) or not records:
+            self._send_json(
+                {"error": "Aucune source à synthétiser : lance d'abord une recherche."},
+                status=400,
+            )
+            return
+
+        sources = format_sources([r for r in records if isinstance(r, dict)])
+        if not sources:
+            self._send_json({"error": "Les résultats fournis n'ont aucun titre exploitable."}, status=400)
+            return
+
+        # The user's own imported documents are folded in when they asked for
+        # it, so a review can draw on material no provider indexes.
+        library_excerpts = ""
+        version_ids = payload.get("library_version_ids")
+        if isinstance(version_ids, list) and version_ids:
+            try:
+                context = get_workspace().document_context(
+                    [str(v) for v in version_ids if str(v).strip()], question, max_tokens=700
+                )
+                library_excerpts = str(context.get("text", ""))
+            except Exception:
+                library_excerpts = ""
+
+        try:
+            backend = _build_backend({**payload, "allow_writes": False, "workspace_path": ""})
+        except Exception as exc:
+            self._send_json({"error": f"Modèle indisponible pour la synthèse : {exc}"}, status=503)
+            return
+
+        prompt = build_synthesis_prompt(question, sources, library_excerpts=library_excerpts)
+        try:
+            raw = asyncio.run(
+                backend.complete(
+                    prompt,
+                    temperature=0.2,
+                    system_prompt=(
+                        "Tu es un assistant de revue de litterature. Tu ne cites "
+                        "que les sources fournies et tu n'inventes aucune reference."
+                    ),
+                    max_tokens=int(payload.get("max_tokens", 900)),
+                )
+            )
+        except Exception as exc:
+            self._send_json({"error": f"Synthèse impossible : {exc}"}, status=502)
+            return
+
+        result = parse_synthesis(raw, source_count=len(sources))
+        result["sources"] = sources
+        result["question"] = question
+        result["used_library"] = bool(library_excerpts)
+
+        # Saved automatically: a review the user has to re-run to consult
+        # again is a chat message, not research material.
+        try:
+            note = get_workspace().create_note(
+                synthesis_as_note(question, result, sources),
+                title=f"Revue : {question}"[:200],
+            )
+            result["note_id"] = note.get("id", "")
+        except Exception:
+            result["note_id"] = ""
+
+        self._send_json(result)
 
     def _handle_v1_compare(self) -> None:
         payload = self._read_json_payload(max_bytes=256_000)

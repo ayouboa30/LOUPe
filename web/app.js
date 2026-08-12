@@ -158,6 +158,8 @@ const scientificSearchInput = el("scientific-search-input");
 const scientificSearchButton = el("scientific-search-button");
 const scientificSearchStatus = el("scientific-search-status");
 const scientificResultsEl = el("scientific-results");
+const synthesizeButton = el("synthesize-button");
+const synthesizeHint = el("synthesize-hint");
 const librarySearchInput = el("library-search-input");
 const libraryListEl = el("scientific-library-list");
 const libraryExportFormat = el("library-export-format");
@@ -3125,8 +3127,12 @@ async function runScientificSearch() {
       appendResearchTrace(wrap, "warning", `${provider} : ${error}`);
     }
     state.scientificResults = Array.isArray(payload.results) ? payload.results : [];
+    state.lastScientificQuestion = query;
     rememberScientificResults(state.scientificResults);
     renderScientificResults();
+    // The review is only offered once there is something to review; a
+    // button that errors on an empty list is worse than no button.
+    showSynthesizeAffordance(state.scientificResults.length > 0);
     finalizeScientificSearchMessage(wrap, query, payload);
     if (scientificSearchStatus) scientificSearchStatus.textContent = `${state.scientificResults.length} résultat(s) affiché(s) · run ${String(payload.run_id || "local").slice(0, 8)}`;
   } catch (error) {
@@ -3223,7 +3229,124 @@ async function exportScientificBibliography() {
   }
 }
 
+// ---------------------------------------------------------------- literature review
+//
+// The federated search returns titles; this turns them into an answer. The
+// model only ever sees the abstracts that were actually retrieved, so every
+// claim carries a [n] pointing at a source the user can open - and the
+// "lacunes" section names what those sources leave unanswered instead of
+// papering over it, which is the part that tells a researcher where to work.
+
+function showSynthesizeAffordance(available) {
+  if (synthesizeButton) synthesizeButton.hidden = !available;
+  if (synthesizeHint) synthesizeHint.hidden = !available;
+}
+
+function renderSynthesis(wrap, payload) {
+  const sources = Array.isArray(payload.sources) ? payload.sources : [];
+
+  // Citations become links against the numbered sources the server returned,
+  // so [3] always resolves to the paper the model was actually shown.
+  // Escaping happens first: the model's text is untrusted input.
+  const linkCitations = (text) =>
+    escapeHtml(String(text || "")).replace(/\[(\d{1,2})\]/g, (match, n) => {
+      const source = sources.find((s) => String(s.n) === String(n));
+      if (!source || !source.url) return match;
+      return `<a href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer" title="${escapeHtml(source.title)}">${match}</a>`;
+    });
+
+  // Applied to the bullet lists too, not just the prose: in practice the
+  // citations land there at least as often.
+  const list = (items) => (items || []).map((item) => `<li>${linkCitations(item)}</li>`).join("");
+  const linked = linkCitations(payload.synthesis).replace(/\n\n+/g, "</p><p class='review-lead'>");
+
+  const section = (title, items, className = "") =>
+    (items || []).length
+      ? `<div class="review-block ${className}"><h5>${title}</h5><ul>${list(items)}</ul></div>`
+      : "";
+
+  const references = sources
+    .map(
+      (s) =>
+        `<li>${s.url ? `<a href="${escapeHtml(s.url)}" target="_blank" rel="noreferrer">${escapeHtml(s.title)}</a>` : escapeHtml(s.title)}` +
+        `${s.year ? ` <span class="review-year">(${escapeHtml(String(s.year))})</span>` : ""}</li>`,
+    )
+    .join("");
+
+  const noCitations =
+    payload.synthesis && (!payload.citations || payload.citations.length === 0)
+      ? `<p class="review-warning">Cette synthèse ne cite aucune source : traite-la comme une piste, pas comme un résultat établi.</p>`
+      : "";
+
+  const content = wrap.querySelector(".msg-content");
+  content.innerHTML =
+    `<div class="review">` +
+    `<p class="review-lead">${linked}</p>` +
+    noCitations +
+    section("Consensus", payload.consensus) +
+    section("Désaccords", payload.disagreements) +
+    section("Ce que ces sources ne permettent pas de conclure", payload.gaps, "review-gaps") +
+    `<details class="review-sources"><summary>${sources.length} source(s) lue(s)</summary><ol>${references}</ol></details>` +
+    `</div>`;
+  renderMathIn(content);
+}
+
+async function runSynthesis() {
+  const results = Array.isArray(state.scientificResults) ? state.scientificResults : [];
+  const question = String(scientificSearchInput?.value || "").trim() || state.lastScientificQuestion || "";
+  if (!results.length || !question) return;
+
+  synthesizeButton.disabled = true;
+  const wrap = addAssistantMessage({ title: "Revue de littérature", watch: true });
+  appendResearchTrace(wrap, "planned", `Lecture de ${results.length} résumé(s) récupéré(s).`);
+  updateThinkingStatus(wrap, "Lecture des résumés et rédaction de la revue…");
+
+  try {
+    const response = await fetch("/api/v1/research/synthesize", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        question,
+        records: results,
+        backend: backendSelect.value,
+        model: selectedModel(),
+        reflection_level: selectedReflectionLevel(),
+        api_key: apiKeyInput.value,
+        max_tokens: 900,
+        // Fold in the user's own imported documents when the library
+        // toggle is on, so a review can use material no provider indexes.
+        library_version_ids: libraryToggle?.checked
+          ? state.documents.filter((d) => d.versionId).map((d) => d.versionId)
+          : [],
+      }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || payload.error) throw new Error(payload.error || `HTTP ${response.status}`);
+
+    wrap.classList.remove("is-running");
+    const stateLabel = wrap.querySelector(".lab-notebook-state");
+    if (stateLabel) stateLabel.textContent = "ARCHIVÉ";
+    renderSynthesis(wrap, payload);
+    appendResearchTrace(
+      wrap,
+      "completed",
+      `${(payload.citations || []).length} citation(s) · ${(payload.gaps || []).length} lacune(s) identifiée(s).`,
+    );
+    const trace = wrap.querySelector(".lab-research-trace");
+    if (trace) trace.open = false;
+    if (payload.note_id) {
+      void loadNotebookNotes();
+      if (scientificSearchStatus) scientificSearchStatus.textContent = "Revue enregistrée dans le carnet de recherche.";
+    }
+  } catch (error) {
+    errorInAssistantMessage(wrap, `Revue impossible : ${error.message || error}`);
+  } finally {
+    synthesizeButton.disabled = false;
+  }
+}
+
 if (scientificSearchButton) scientificSearchButton.addEventListener("click", runScientificSearch);
+if (synthesizeButton) synthesizeButton.addEventListener("click", runSynthesis);
 if (scientificSearchInput) scientificSearchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
