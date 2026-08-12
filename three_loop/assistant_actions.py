@@ -325,6 +325,45 @@ def build_screen_reading_prompt(ocr_text: str, question: str | None = None) -> s
     )
 
 
+def build_stuck_help_prompt(ocr_text: str, question: str | None = None) -> str | None:
+    """Prompt for "the user has been staring at this and is stuck".
+
+    Deliberately not ``build_screen_reading_prompt``: that one describes what
+    is on screen, which is the wrong answer to give someone who has been
+    looking at it for a while already. They can see it. What they cannot see
+    is the way out - so this asks for the blocking point first and a concrete
+    next step, and forbids restating the screen back at them.
+
+    Returns ``None`` when OCR found too little to reason about, so the caller
+    can fall back to simply asking what is wrong instead of sending the model
+    a prompt with no content.
+    """
+
+    compacted = compact_screen_text(ocr_text or "")
+    if len(compacted) < _MIN_USEFUL_CHARS:
+        return None
+    question = (question or "").strip()
+    question_part = (
+        f"La personne precise: {question}\n\n"
+        if question
+        else "Elle n'a rien precise: deduis le blocage du contenu lui-meme.\n\n"
+    )
+    return (
+        "Le regard de la personne reste fige au meme endroit de son ecran "
+        "depuis un moment : elle bloque probablement sur quelque chose. Voici "
+        "ce que l'OCR a lu, brut et melange avec des elements d'interface "
+        "(titres de fenetres, menus, barre des taches).\n\n"
+        f"---\n{compacted}\n---\n\n"
+        f"{question_part}"
+        "Commence par nommer le blocage le plus probable en une phrase, puis "
+        "donne l'etape concrete suivante. S'il y a un message d'erreur, "
+        "explique sa cause reelle et comment la corriger. Ne redecris pas "
+        "l'ecran : elle le voit deja. Si le contenu ne permet pas d'identifier "
+        "un blocage, dis-le franchement et demande la precision qui te manque. "
+        "Reponds en francais, court et directement actionnable."
+    )
+
+
 def _search_query_from_screen_text(
     compacted: str,
     *,

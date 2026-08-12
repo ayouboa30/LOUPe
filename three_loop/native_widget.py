@@ -144,6 +144,7 @@ from . import notify
 from .assistant_actions import (
     build_screen_reading_prompt,
     build_screen_search_prompt,
+    build_stuck_help_prompt,
     capture_screen,
     listen_and_transcribe,
     load_assistant_settings,
@@ -1449,13 +1450,15 @@ class NativeWidget:
                 title="Besoin d'un coup de main ?",
                 lines=(
                     "Ton regard reste au même endroit depuis un moment.",
-                    "Clique-moi et dis-moi ce qui bloque.",
+                    "Clique-moi : je lis ton écran et je te dis ce qui coince.",
                 ),
                 # No timeout: an offer that vanishes on its own is one the user
                 # cannot accept. It goes away when clicked, or when the next
                 # bubble replaces it.
                 timeout_s=None,
-                footer="Clique pour poser ta question · ignore pour continuer",
+                # The click is the consent for the screen capture, so it has
+                # to say what it will do *before* being clicked, not after.
+                footer="Clique pour que je regarde · ignore pour continuer",
             ),
             is_result=True,
         )
@@ -1482,19 +1485,49 @@ class NativeWidget:
         return True
 
     def _gaze_help_worker(self) -> None:
-        """Ask the question, then hand it to the engine like the mic flow does.
+        """Read the screen the user is stuck on, rather than asking about it.
 
-        ``ask_question`` blocks and pumps its own message loop, so it must not
-        run on the widget's UI thread - the same reason the research flow uses
-        a worker.
+        Asking "what is blocking you?" puts the work back on someone who is
+        already stuck, and requires them to describe something they may not
+        have words for yet. The screen they have been staring at is right
+        there, and OCR plus the local model can name the blocking point from
+        it - which is what the gaze detection was for in the first place.
+
+        Falls back to the question dialog when OCR yields too little to reason
+        about (an image, a video, a blank editor), because an empty prompt
+        would produce a confident answer about nothing.
+
+        Runs off the UI thread: both the capture and ``ask_question`` block,
+        and ``ask_question`` pumps its own message loop.
         """
+
+        prompt = None
+        try:
+            # Only OCR text leaves this function - the screenshot itself is
+            # never stored nor transmitted.
+            prompt = build_stuck_help_prompt(ocr_image(capture_screen()))
+        except Exception:
+            prompt = None  # no OCR engine, capture refused: fall through
+
+        if prompt is not None:
+            run_prompt_in_background(
+                prompt,
+                port=self._port,
+                on_done=self._finish_prompt,
+                on_started=lambda: self._say(
+                    "Je regarde",
+                    "Je lis ton écran pour trouver ce qui coince.",
+                    timeout_s=6.0,
+                ),
+            )
+            return
 
         try:
             options = ask_question(
                 title="Qu'est-ce qui bloque ?",
                 description=(
-                    "Dis-moi ce sur quoi tu bloques, je m'en occupe. "
-                    "Laisse vide pour annuler."
+                    "Je n'ai rien pu lire à l'écran. Dis-moi ce sur quoi tu "
+                    "bloques, je m'en occupe. Laisse vide pour annuler."
                 ),
                 placeholder="ex: je ne comprends pas cette erreur",
             )
