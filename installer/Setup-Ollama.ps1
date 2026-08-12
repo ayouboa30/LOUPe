@@ -14,7 +14,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
-$logPath = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1.2-install.log"
+$logPath = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1.3-install.log"
 New-Item -ItemType Directory -Force -Path (Split-Path $logPath) | Out-Null
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
@@ -173,7 +173,7 @@ function Convert-ToInt64([string] $Value) {
 function Get-ModelsDirectory {
   $directory = $ModelsDirectory.Trim()
   if ([string]::IsNullOrWhiteSpace($directory)) {
-    $directory = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1.2\models"
+    $directory = Join-Path $env:LOCALAPPDATA "LOUPe\beta-0.1.3\models"
   }
   New-Item -ItemType Directory -Force -Path $directory | Out-Null
   return (Resolve-Path -LiteralPath $directory).Path
@@ -372,7 +372,7 @@ function Prepare-Ollama {
   }
 }
 
-Log "LOUPe beta 0.1.2 : préparation des composants sélectionnés."
+Log "LOUPe beta 0.1.3 : préparation des composants sélectionnés."
 
 if (Is-Enabled $InstallWebView2) {
   if (-not (Test-WebView2)) {

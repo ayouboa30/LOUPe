@@ -19,7 +19,7 @@ import re
 import urllib.error
 import urllib.request
 
-CURRENT_VERSION = "0.1.2"
+CURRENT_VERSION = "0.1.3"
 
 _RELEASES_API = "https://api.github.com/repos/ayouboa30/LOUPe/releases/latest"
 
