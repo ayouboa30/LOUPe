@@ -1,4 +1,4 @@
-# LOUPe beta 0.1.3
+# LOUPe beta 0.1.4
 
 Application de bureau expérimentale de débat multi-agents. Cette version est une
 **bêta publique** : elle peut contenir des bugs, ralentissements ou changements
@@ -83,9 +83,9 @@ système. Le widget flottant Win32, la capture de région et la dictée restent
 désactivés dans ce bundle ; l’OCR Tesseract fonctionne si ses paquets système
 sont présents.
 
-## Installation Windows (LOUPe beta 0.1.3)
+## Installation Windows (LOUPe beta 0.1.4)
 
-Télécharge `Setup_LOUPe_beta_0.1.3.exe` depuis
+Télécharge `Setup_LOUPe_beta_0.1.4.exe` depuis
 [www.ayoubouladali.com/projects.html#loupe-beta](https://www.ayoubouladali.com/projects.html#loupe-beta)
 (ou directement la [dernière release GitHub](https://github.com/ayouboa30/LOUPe/releases/latest))
 et lance-le. L’assistant
