@@ -362,7 +362,12 @@ class _WNDCLASS(ctypes.Structure):
 #: on the desktop whether it is authored on a 32x32 grid (x4) or a 64x64 one
 #: (x2). Writing the factor down instead would mean editing it - and the eye
 #: maths, and the geometry - every time the art changes grid.
-_SPRITE_TARGET_PX = 128
+#: 160 rather than the previous 128: the art moved from a 64x64 authoring grid
+#: to 80x80, and floor division would otherwise land on x1 (80px on screen -
+#: a companion that got *smaller* as its art got finer). 160 keeps the whole
+#: number upscale that makes pixel art crisp, at x2, and grows the character on
+#: the desktop by the same 25% the grid gained.
+_SPRITE_TARGET_PX = 160
 
 #: The variants of a character. ``plain`` is the normal look; ``watch`` is worn
 #: while research-assistant mode reads the screen (the researcher shows a
@@ -1659,22 +1664,37 @@ class NativeWidget:
 
             if width >= 3 and height >= 3:
                 # Corners left untouched (not cleared) so the body shows
-                # through and the eye reads as rounded - the same trick the
-                # generator uses, and the reason this is three slices instead
-                # of one rectangle.
-                canvas[py : py + scale, px + scale : px + (width - 1) * scale] = self._eye_bgra
-                canvas[py + scale : py + (height - 1) * scale, px : px + width * scale] = self._eye_bgra
-                canvas[
-                    py + (height - 1) * scale : py + height * scale,
-                    px + scale : px + (width - 1) * scale,
-                ] = self._eye_bgra
+                # through and the eye reads as rounded. The radius grows with
+                # the eye: on the current 9x10 eye a single-pixel bevel leaves
+                # a rectangle, and rectangular eyes are what make a face look
+                # dead. Mirrors generate_pixel_researcher._draw_eyes exactly -
+                # these eyes are drawn live over sheets whose other frames have
+                # them baked in, so any divergence shows as the face changing
+                # shape mid-animation.
+                corner = max(1, round(width / 5))
+                for row in range(height):
+                    near_y = min(row, height - 1 - row)
+                    # First and last column of this row that are inside the
+                    # rounded silhouette.
+                    keep = max(0, corner - near_y)
+                    canvas[
+                        py + row * scale : py + (row + 1) * scale,
+                        px + keep * scale : px + (width - keep) * scale,
+                    ] = self._eye_bgra
             else:
                 canvas[py : py + height * scale, px : px + width * scale] = self._eye_bgra
 
             if width >= 3 and height >= 4:
-                # Two logical pixels of specular glint, upper-left, same place
-                # the generator puts it.
-                canvas[py + scale : py + 2 * scale, px + scale : px + 3 * scale] = self._glint_bgra
+                # Specular glint, upper-left, scaled with the eye for the same
+                # reason - held at two pixels it becomes a speck on a big eye
+                # and the character loses its spark.
+                corner = max(1, round(width / 5))
+                gw = max(2, round(width / 2.6))
+                gh = max(2, round(height / 3.2))
+                canvas[
+                    py + corner * scale : py + (corner + gh) * scale,
+                    px + corner * scale : px + (corner + gw) * scale,
+                ] = self._glint_bgra
 
     def _reassert_topmost(self, now: float) -> None:
         """Re-claim the top of the z-order, about once a second.

@@ -46,16 +46,30 @@ from PIL import Image
 # Grid and pose constants: identical to the researcher's and Pixelbit's.
 # --------------------------------------------------------------------------
 
-LOGICAL = 64
-CENTRE_X = (LOGICAL - 1) / 2.0
+LOGICAL = 80
+
+#: The grid every coordinate below is *written* in. Shapes here are analytic,
+#: so rasterising the same authored geometry on a finer grid produces real
+#: extra detail rather than an upscale of the old pixels. Keeping authoring
+#: at 64 means none of the hand-tuned coordinates needed rescaling.
+AUTHOR = 64.0
+
+#: Raster pixels per authored unit. Anything that indexes the canvas directly
+#: multiplies by this; masks built from _disc/_capsule/_ring do not, because
+#: those already evaluate in authoring space.
+SCALE = LOGICAL / AUTHOR
+CENTRE_X = (AUTHOR - 1) / 2.0
 GROUND_Y = 58.0
 REST_HEIGHT = 47.0
 MAX_BOB = 7
 HOLE_Y = 8.0
 
-EYE_WIDTH = 6
-EYE_HEIGHT = 7
-EYE_SPACING = 7.5
+#: Bigger than the 6x7 they were: oversized eyes are the strongest kawaii
+#: cue, and the finer grid is what makes room for them. Spacing widened to
+#: match so the extra width does not close the gap between them.
+EYE_WIDTH = 7
+EYE_HEIGHT = 8
+EYE_SPACING = 8.0
 
 #: Terminal palette: near-black contours and body base, neon-green hoodie as
 #: the dominant colour, a brighter neon for highlights/glow, cyan for the
@@ -214,7 +228,18 @@ def _all_frames() -> list[FrameSpec]:
 # Generic geometry engine, copied verbatim from generate_pixel_researcher.py.
 # --------------------------------------------------------------------------
 
-_YY, _XX = np.mgrid[0:LOGICAL, 0:LOGICAL]
+#: Raster indices expressed in *authoring* units, so every ellipse below keeps
+#: the coordinates it was tuned with while being evaluated at the finer
+#: LOGICAL resolution. The half-pixel terms sample at pixel centres.
+_RY, _RX = np.mgrid[0:LOGICAL, 0:LOGICAL]
+_YY = (_RY + 0.5) / SCALE - 0.5
+_XX = (_RX + 0.5) / SCALE - 0.5
+
+
+def _px(value: float) -> int:
+    """Authoring unit -> raster pixel index, rounded half up."""
+
+    return int(math.floor(value * SCALE + 0.5))
 
 
 def _disc(cx: float, cy: float, rx: float, ry: float) -> np.ndarray:
@@ -641,20 +666,20 @@ def _draw_props(canvas: Canvas, spec: FrameSpec) -> None:
     lift_a = -spec.float_a
     lift_b = -spec.float_b
 
-    _stamp(canvas, _ANGLE_BRACKETS, _PROP_BRACKETS[0], _PROP_BRACKETS[1] + lift_b)
-    _stamp(canvas, _CURLY_BRACES, _PROP_BRACES[0], _PROP_BRACES[1] + lift_a)
+    _stamp(canvas, _ANGLE_BRACKETS, _px(_PROP_BRACKETS[0]), _px(_PROP_BRACKETS[1] + lift_b))
+    _stamp(canvas, _CURLY_BRACES, _px(_PROP_BRACES[0]), _px(_PROP_BRACES[1] + lift_a))
 
     for index, (x0, y0) in enumerate(_PROP_BINARY):
-        _stamp(canvas, _BINARY, x0, y0 + (lift_a if index % 2 else lift_b))
+        _stamp(canvas, _BINARY, _px(x0), _px(y0 + (lift_a if index % 2 else lift_b)))
 
     # Blinking terminal cursor: a small solid cyan block that only appears
     # while ``cursor_on`` is true, i.e. it winks on/off across the idle loop
     # and the hop.
     if spec.cursor_on:
-        _stamp(canvas, _CURSOR_BLOCK, _PROP_CURSOR[0], _PROP_CURSOR[1] + lift_a)
+        _stamp(canvas, _CURSOR_BLOCK, _px(_PROP_CURSOR[0]), _px(_PROP_CURSOR[1] + lift_a))
 
     for index, (x0, y0) in enumerate(_PROP_DUST):
-        canvas.set(x0, y0 + (lift_b if index % 2 else lift_a), "spark")
+        canvas.set(_px(x0), _px(y0 + (lift_b if index % 2 else lift_a)), "spark")
 
 
 # --------------------------------------------------------------------------
@@ -670,9 +695,11 @@ _SPARKLE_OFFSETS = ((-13, -11), (13, -11), (-16, 5), (16, 5), (0, -19), (0, 11))
 
 
 def _eye_box(spec: FrameSpec) -> tuple[int, int]:
+    # Returned in *raster* pixels: _draw_eyes and native_widget both step this
+    # box one canvas pixel at a time, and the JSON publishes the same numbers.
     return (
-        max(1, _round(EYE_WIDTH * spec.scale)),
-        max(1, _round(EYE_HEIGHT * spec.scale)),
+        max(1, _px(EYE_WIDTH * spec.scale)),
+        max(1, _px(EYE_HEIGHT * spec.scale)),
     )
 
 
@@ -680,9 +707,12 @@ def _eye_anchors(spec: FrameSpec) -> list[tuple[int, int]]:
     width, height = _eye_box(spec)
     centre_x, _centre_y = _map_point(spec, CENTRE_X, _EYE_CENTRE_Y)
     left_cx, left_cy = _map_point(spec, CENTRE_X - EYE_SPACING, _EYE_CENTRE_Y)
-    left_x = _round(left_cx - (width - 1) / 2.0)
-    top_y = _round(left_cy - (height - 1) / 2.0)
-    right_x = _round(2.0 * centre_x - left_x - (width - 1))
+    # _map_point works in authoring units, the canvas is indexed in raster
+    # pixels: both centres cross over here, before the rounding, so the
+    # mirror below still lands on a whole pixel.
+    left_x = _round(left_cx * SCALE - (width - 1) / 2.0)
+    top_y = _round(left_cy * SCALE - (height - 1) / 2.0)
+    right_x = _round(2.0 * centre_x * SCALE - left_x - (width - 1))
     return [(left_x, top_y), (right_x, top_y)]
 
 
@@ -696,21 +726,32 @@ def _draw_eyes(canvas: Canvas, spec: FrameSpec) -> None:
             for dx in range(width):
                 canvas.set(x0 + dx, bar, "eye")
             continue
-        rounded = width >= 3 and height >= 3
+        # Corner radius grows with the eye: knocking off a single pixel of a
+        # 9x10 eye leaves a rectangle, and rectangular eyes are the fastest
+        # way to make a face look dead rather than cute.
+        corner = max(1, round(width / 5))
         for dy in range(height):
             for dx in range(width):
-                if rounded and dx in (0, width - 1) and dy in (0, height - 1):
-                    continue
+                near_x = min(dx, width - 1 - dx)
+                near_y = min(dy, height - 1 - dy)
+                if near_x + near_y < corner:
+                    continue  # corner left to the body: that is the rounding
                 canvas.set(x0 + dx, y0 + dy, "eye")
-        if width >= 3 and height >= 4:
-            canvas.set(x0 + 1, y0 + 1, "glint")
-            canvas.set(x0 + 2, y0 + 1, "glint")
+        # The glint scales with the eye too. Held at two fixed pixels it
+        # became a speck on the bigger eye and the face lost its spark.
+        gw, gh = max(2, round(width / 2.6)), max(2, round(height / 3.2))
+        for dy in range(gh):
+            for dx in range(gw):
+                canvas.set(x0 + corner + dx, y0 + corner + dy, "glint")
 
 
 def _draw_face(canvas: Canvas, spec: FrameSpec, body: np.ndarray) -> None:
     centre_x, mouth_y = _map_point(spec, CENTRE_X, _MOUTH_Y)
-    mouth_x = _round(centre_x)
-    row = _round(mouth_y)
+    # _map_point answers in authoring units and the canvas is indexed in
+    # raster pixels: without this crossing the mouth lands high and left of
+    # the face, where the body clip silently discards it.
+    mouth_x = _round(centre_x * SCALE)
+    row = _round(mouth_y * SCALE)
     half = 1 + spec.smile
     for dx in range(-half, half + 1):
         depth = 1 if abs(dx) <= half - 1 else 0
@@ -729,7 +770,7 @@ def _draw_face(canvas: Canvas, spec: FrameSpec, body: np.ndarray) -> None:
                     CENTRE_X + side * _BLUSH_X + (dx - 1) * side,
                     _BLUSH_Y + dy,
                 )
-                x, y = _round(cheek_x), _round(cheek_y)
+                x, y = _round(cheek_x * SCALE), _round(cheek_y * SCALE)
                 if 0 <= x < LOGICAL and 0 <= y < LOGICAL and body[y, x]:
                     canvas.blend(x, y, "blush", strength)
 
@@ -771,10 +812,14 @@ def compose(spec: FrameSpec, *, eyes: bool) -> Canvas:
 
     canvas.fill(_boundary(silhouette), "outline")
 
-    if eyes or spec.bake_eyes:
-        _draw_eyes(canvas, spec)
+    # Mouth and cheeks go down *before* the eyes so the eyes always win where
+    # they overlap: the desktop companion draws its own eyes over the eyeless
+    # sheet at runtime and can only ever put them on top, so baking the blush
+    # over an eye here would make the two paths disagree by a pixel.
     if spec.face:
         _draw_face(canvas, spec, layers["body"])
+    if eyes or spec.bake_eyes:
+        _draw_eyes(canvas, spec)
 
     _draw_sparkles(canvas, spec)
     return canvas
@@ -820,8 +865,10 @@ def metadata() -> dict[str, object]:
     return {
         "logical_size": LOGICAL,
         "frame_count": len(frames_meta),
-        "ground_y": GROUND_Y,
-        "eye": {"width": EYE_WIDTH, "height": EYE_HEIGHT},
+        # Published in raster pixels: both consumers measure these against the
+        # emitted image, not against the authoring grid.
+        "ground_y": GROUND_Y * SCALE,
+        "eye": {"width": _px(EYE_WIDTH), "height": _px(EYE_HEIGHT)},
         "clips": clips_meta,
         "frames": frames_meta,
         "palette": {key: list(value) for key, value in PALETTE.items()},

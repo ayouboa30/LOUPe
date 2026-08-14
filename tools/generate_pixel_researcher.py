@@ -64,11 +64,26 @@ from PIL import Image
 #: Logical pixel grid. Everything is authored at this size and scaled up with
 #: nearest-neighbour at display time, which is what keeps the pixels crisp
 #: instead of turning into a smudge.
-LOGICAL = 64
+LOGICAL = 80
 
-#: Horizontal centre of the canvas. 31.5 on an even grid, so any shape built
-#: symmetrically around it comes out perfectly mirrored.
-CENTRE_X = (LOGICAL - 1) / 2.0
+#: The grid every coordinate in this file is *written* in. Shapes here are
+#: analytic (ellipses, capsules, rings), so rasterising the same authored
+#: geometry on a finer grid produces genuinely more detail rather than an
+#: upscale of the old pixels - which is the whole point of raising LOGICAL.
+#: Keeping the authoring space at 64 means none of the hand-tuned coordinates
+#: below had to be rescaled by hand, and a future resolution bump is one
+#: number.
+AUTHOR = 64.0
+
+#: Raster pixels per authored unit. Everything that indexes the canvas
+#: directly (eyes, stamped props) multiplies by this; everything that builds a
+#: mask through _disc/_capsule/_ring does not, because those already evaluate
+#: in authoring space.
+SCALE = LOGICAL / AUTHOR
+
+#: Horizontal centre of the canvas, in authoring units. 31.5 on an even grid,
+#: so any shape built symmetrically around it comes out perfectly mirrored.
+CENTRE_X = (AUTHOR - 1) / 2.0
 
 #: Ground line, in logical pixels: the row the feet rest on. Published in the
 #: JSON as ``ground_y`` because the desktop companion uses it to keep the
@@ -88,9 +103,13 @@ HOLE_Y = 8.0
 
 #: Eye geometry at scale 1.0, in logical pixels. Mirrored into the JSON
 #: metadata so the generator and the native widget cannot drift apart.
-EYE_WIDTH = 6
-EYE_HEIGHT = 7
-EYE_SPACING = 7.5  # distance from the face centre to each eye centre
+#: Bigger than the 6x7 they were: oversized eyes are the single strongest
+#: kawaii cue, and the finer grid is what makes room for them without turning
+#: the face into two rectangles. Spacing widened to match, so the extra width
+#: does not close the gap between them.
+EYE_WIDTH = 7
+EYE_HEIGHT = 8
+EYE_SPACING = 8.0  # distance from the face centre to each eye centre
 
 #: Deliberately small palette: pure white, off white, lavender, three violets,
 #: a near-black violet for outlines, and one very discreet pink for the
@@ -319,13 +338,31 @@ def _all_frames() -> list[FrameSpec]:
 # never means re-deriving its deformation maths.
 # --------------------------------------------------------------------------
 
-_YY, _XX = np.mgrid[0:LOGICAL, 0:LOGICAL]
+#: Raster indices expressed in *authoring* units, so every ellipse and capsule
+#: below keeps the coordinates it was tuned with while being evaluated at the
+#: finer LOGICAL resolution. The half-pixel terms sample at pixel centres:
+#: without them the shapes drift a fraction of a unit up and left, which shows
+#: up as a one-pixel asymmetry on a face built around 31.5.
+_RY, _RX = np.mgrid[0:LOGICAL, 0:LOGICAL]
+_YY = (_RY + 0.5) / SCALE - 0.5
+_XX = (_RX + 0.5) / SCALE - 0.5
+
+
+def _px(value: float) -> int:
+    """Authoring unit -> raster pixel index, rounded half up."""
+
+    return int(math.floor(value * SCALE + 0.5))
 
 #: Head and belly are two overlapping discs. Their union gives the soft
 #: cloud/droplet waist asked for, with no straight edges anywhere - which is
 #: exactly why it is built from discs rather than from a profile table.
-_HEAD = (CENTRE_X, 25.0, 15.0, 14.5)   # cx, cy, rx, ry
-_BELLY = (CENTRE_X, 43.0, 12.0, 11.5)
+#: Head grown and belly narrowed against the previous 15.0/12.0 pair: a large
+#: head over a small body is the classic kawaii proportion, and it is what the
+#: Codex mascot does too - almost all head, a barely-there body. Both are now
+#: near-circular (rx within half a unit of ry) so the silhouette reads as one
+#: soft round shape instead of two stacked eggs.
+_HEAD = (CENTRE_X, 24.5, 16.0, 15.5)   # cx, cy, rx, ry
+_BELLY = (CENTRE_X, 43.5, 11.0, 10.5)
 
 #: Hand that holds the magnifier, and the pivot the three tilt variants of the
 #: magnifier are rotated around.
@@ -721,12 +758,12 @@ def _draw_thought_bubble(canvas: Canvas, spec: FrameSpec) -> None:
     )
     canvas.fill(cloud, "coat")
     canvas.fill(_boundary(cloud), "outline")
-    _draw_vial(canvas, 5, 4, spec.bubble)
+    _draw_vial(canvas, _px(5), _px(4), spec.bubble)
     # Trail: a round puff below the cloud, then a single pixel near the head.
     puff = _disc(12.5, 18.5, 1.9, 1.9)
     canvas.fill(puff, "coat")
     canvas.fill(_boundary(puff), "outline")
-    canvas.set(15, 21, "coat")
+    canvas.set(_px(15), _px(21), "coat")
 
 
 # --------------------------------------------------------------------------
@@ -796,9 +833,11 @@ def _eye_box(spec: FrameSpec) -> tuple[int, int]:
     because that comes from _map_point.
     """
 
+    # Returned in *raster* pixels: _draw_eyes and native_widget both step this
+    # box one canvas pixel at a time, and the JSON publishes the same numbers.
     return (
-        max(1, _round(EYE_WIDTH * spec.scale)),
-        max(1, _round(EYE_HEIGHT * spec.scale)),
+        max(1, _px(EYE_WIDTH * spec.scale)),
+        max(1, _px(EYE_HEIGHT * spec.scale)),
     )
 
 
@@ -812,12 +851,15 @@ def _eye_anchors(spec: FrameSpec) -> list[tuple[int, int]]:
     defect on a symmetric face.
     """
 
+    # _map_point works in authoring units; the canvas is indexed in raster
+    # pixels, so both centres cross over here - before the rounding, so the
+    # mirror below still lands on a whole pixel.
     width, height = _eye_box(spec)
     centre_x, _centre_y = _map_point(spec, CENTRE_X, _EYE_CENTRE_Y)
     left_cx, left_cy = _map_point(spec, CENTRE_X - EYE_SPACING, _EYE_CENTRE_Y)
-    left_x = _round(left_cx - (width - 1) / 2.0)
-    top_y = _round(left_cy - (height - 1) / 2.0)
-    right_x = _round(2.0 * centre_x - left_x - (width - 1))
+    left_x = _round(left_cx * SCALE - (width - 1) / 2.0)
+    top_y = _round(left_cy * SCALE - (height - 1) / 2.0)
+    right_x = _round(2.0 * centre_x * SCALE - left_x - (width - 1))
     return [(left_x, top_y), (right_x, top_y)]
 
 
@@ -1056,19 +1098,24 @@ def _draw_props(canvas: Canvas, spec: FrameSpec) -> None:
     lift_a = -spec.float_a
     lift_b = -spec.float_b
 
-    _stamp(canvas, _ATOM, _PROP_ATOM[0], _PROP_ATOM[1] + lift_a)
-    _stamp(canvas, _DNA, _PROP_DNA[0], _PROP_DNA[1] + lift_b)
-    _stamp(canvas, _BOOKS, _PROP_BOOKS[0], _PROP_BOOKS[1] + lift_b)
-    _draw_vial(canvas, _PROP_VIAL[0], _PROP_VIAL[1] + lift_a, spec.bubble)
+    # Positions cross from authoring units to raster pixels here; the little
+    # sprites themselves keep their authored pixel size. Scaling 5x5 pixel art
+    # by a non-integer factor would leave uneven, ragged edges, and a prop that
+    # sits 20% smaller against a bigger body reads as depth rather than as a
+    # mistake.
+    _stamp(canvas, _ATOM, _px(_PROP_ATOM[0]), _px(_PROP_ATOM[1] + lift_a))
+    _stamp(canvas, _DNA, _px(_PROP_DNA[0]), _px(_PROP_DNA[1] + lift_b))
+    _stamp(canvas, _BOOKS, _px(_PROP_BOOKS[0]), _px(_PROP_BOOKS[1] + lift_b))
+    _draw_vial(canvas, _px(_PROP_VIAL[0]), _px(_PROP_VIAL[1] + lift_a), spec.bubble)
 
     # Each star is one step further along the twinkle cycle than the previous
     # one: a single shared appearance would make them blink as one lamp.
     for index, (x0, y0) in enumerate(_PROP_STARS):
         sprite = _STARS[(spec.twinkle + index) % len(_STARS)]
-        _stamp(canvas, sprite, x0, y0 + (lift_a if index % 2 else lift_b))
+        _stamp(canvas, sprite, _px(x0), _px(y0 + (lift_a if index % 2 else lift_b)))
 
     for index, (x0, y0) in enumerate(_PROP_DUST):
-        canvas.set(x0, y0 + (lift_b if index % 2 else lift_a), "spark")
+        canvas.set(_px(x0), _px(y0 + (lift_b if index % 2 else lift_a)), "spark")
 
 
 def _draw_aura(canvas: Canvas, silhouette: np.ndarray, spec: FrameSpec) -> None:
@@ -1108,45 +1155,66 @@ def _draw_eyes(canvas: Canvas, spec: FrameSpec) -> None:
             for dx in range(width):
                 canvas.set(x0 + dx, bar, "eye")
             continue
-        rounded = width >= 3 and height >= 3
+        # Corner radius grows with the eye: knocking off a single pixel of a
+        # 9x10 eye leaves a rectangle, and rectangular eyes are the fastest way
+        # to make a face look dead rather than cute.
+        corner = max(1, round(width / 5))
         for dy in range(height):
             for dx in range(width):
-                if rounded and dx in (0, width - 1) and dy in (0, height - 1):
+                near_x = min(dx, width - 1 - dx)
+                near_y = min(dy, height - 1 - dy)
+                if near_x + near_y < corner:
                     continue  # corner left to the body: that is the rounding
                 canvas.set(x0 + dx, y0 + dy, "eye")
-        if width >= 3 and height >= 4:
-            canvas.set(x0 + 1, y0 + 1, "glint")
-            canvas.set(x0 + 2, y0 + 1, "glint")
+        # The glint scales with the eye too. Held at two fixed pixels it became
+        # a speck on the bigger eye and the whole face lost its spark - the
+        # single most kawaii detail on the character.
+        gw, gh = max(2, round(width / 2.6)), max(2, round(height / 3.2))
+        for dy in range(gh):
+            for dx in range(gw):
+                canvas.set(x0 + corner + dx, y0 + corner + dy, "glint")
 
 
 def _draw_face(canvas: Canvas, spec: FrameSpec, body: np.ndarray) -> None:
     """Mouth and cheeks, clipped to the body so nothing floats off the face."""
 
+    # _map_point answers in authoring units and the canvas is indexed in raster
+    # pixels: without this crossing the mouth lands high and left of the face,
+    # where the body clip below silently discards it - which is exactly how the
+    # smile went missing when the grid changed.
     centre_x, mouth_y = _map_point(spec, CENTRE_X, _MOUTH_Y)
-    mouth_x = _round(centre_x)
-    row = _round(mouth_y)
-    half = 1 + spec.smile  # 3, 5 or 7 pixels wide
+    mouth_x = _round(centre_x * SCALE)
+    row = _round(mouth_y * SCALE)
+    half = _px(1 + spec.smile)  # authored 3, 5 or 7 units wide
+    thickness = max(1, int(SCALE))  # keep the stroke visible on a finer grid
     for dx in range(-half, half + 1):
         # Ends up, middle down: the minimum a smile needs at this size.
-        depth = 1 if abs(dx) <= half - 1 else 0
-        x, y = mouth_x + dx, row + depth
-        if 0 <= x < LOGICAL and 0 <= y < LOGICAL and body[y, x]:
-            canvas.set(x, y, "mouth")
+        depth = thickness if abs(dx) <= half - thickness else 0
+        for t in range(thickness):
+            x, y = mouth_x + dx, row + depth + t
+            if 0 <= x < LOGICAL and 0 <= y < LOGICAL and body[y, x]:
+                canvas.set(x, y, "mouth")
 
     if spec.scale <= 0.8:
         return
     # Cheeks redden with the smile. Laid with alpha so the shading underneath
     # still shows: an opaque pink patch reads as a sticker.
-    strength = 0.55 + 0.22 * spec.smile
+    # Stronger than the old 0.55 base: a clearly readable blush is one of the
+    # few cues that survives at avatar size, and the previous one washed out
+    # to nothing against the lavender.
+    strength = 0.72 + 0.20 * spec.smile
     for side in (-1, 1):
-        for dx in range(3):
-            for dy in range(2):
+        # Patch sized in raster pixels so the cheeks keep their proportion on
+        # the finer grid instead of shrinking to a couple of dots.
+        for dx in range(_px(3)):
+            for dy in range(_px(2)):
                 cheek_x, cheek_y = _map_point(
                     spec,
-                    CENTRE_X + side * _BLUSH_X + (dx - 1) * side,
-                    _BLUSH_Y + dy,
+                    CENTRE_X + side * _BLUSH_X,
+                    _BLUSH_Y,
                 )
-                x, y = _round(cheek_x), _round(cheek_y)
+                x = _round(cheek_x * SCALE) + (dx - _px(1)) * side
+                y = _round(cheek_y * SCALE) + dy
                 if 0 <= x < LOGICAL and 0 <= y < LOGICAL and body[y, x]:
                     canvas.blend(x, y, "blush", strength)
 
@@ -1209,10 +1277,16 @@ def compose(spec: FrameSpec, *, watch: bool, eyes: bool) -> Canvas:
     canvas.fill(_boundary(silhouette), "outline")
 
     # 5. Face last: it has to sit on top of the shading and the outline.
-    if eyes or spec.bake_eyes:
-        _draw_eyes(canvas, spec)
+    # Mouth and cheeks go down *before* the eyes so the eyes always win where
+    # they overlap. That order is not cosmetic: the desktop companion draws
+    # its own eyes over the eyeless sheet at runtime, so it can only ever put
+    # them on top - baking the blush over an eye here made the two paths
+    # disagree by a pixel on the frames where the widened eyes now reach the
+    # cheeks.
     if spec.face:
         _draw_face(canvas, spec, layers["body"])
+    if eyes or spec.bake_eyes:
+        _draw_eyes(canvas, spec)
 
     _draw_sparkles(canvas, spec)
 
@@ -1260,10 +1334,22 @@ def build_icon_frame() -> Image.Image:
     frame = build_frame(spec, watch=False, eyes=True)
     box = frame.getbbox() or (0, 0, LOGICAL, LOGICAL)
     cropped = frame.crop(box)
-    square = Image.new("RGBA", (LOGICAL, LOGICAL), (0, 0, 0, 0))
+
+    # The square is a power of two rather than LOGICAL, because every ICON_SIZE
+    # has to be an integer ratio of it and LOGICAL is free to be any authoring
+    # resolution (80 divides none of 16/32/64/128/256). The crop is first blown
+    # up by the largest whole factor that still fits, so the character fills the
+    # square instead of floating in the middle of it - a nearest-neighbour
+    # integer zoom, so the pixels stay square.
+    zoom = max(1, min(ICON_SQUARE // cropped.width, ICON_SQUARE // cropped.height))
+    if zoom > 1:
+        cropped = cropped.resize(
+            (cropped.width * zoom, cropped.height * zoom), Image.NEAREST
+        )
+    square = Image.new("RGBA", (ICON_SQUARE, ICON_SQUARE), (0, 0, 0, 0))
     square.paste(
         cropped,
-        ((LOGICAL - cropped.width) // 2, (LOGICAL - cropped.height) // 2),
+        ((ICON_SQUARE - cropped.width) // 2, (ICON_SQUARE - cropped.height) // 2),
     )
     return square
 
@@ -1273,6 +1359,11 @@ def build_icon_frame() -> Image.Image:
 #: and the icon comes out blurry or empty depending on the context. Mirrors
 #: $iconSizes in build_exe.ps1.
 ICON_SIZES = (16, 32, 64, 128, 256)
+
+#: Side of the square the icon is composed on. A power of two so every entry in
+#: ICON_SIZES is a whole ratio of it, and large enough to hold the character at
+#: a useful zoom whatever LOGICAL happens to be.
+ICON_SQUARE = 128
 
 
 def build_icon_sizes() -> list[Image.Image]:
@@ -1287,9 +1378,11 @@ def build_icon_sizes() -> list[Image.Image]:
 
     source = build_icon_frame()
     for size in ICON_SIZES:
-        larger, smaller = max(size, LOGICAL), min(size, LOGICAL)
+        larger, smaller = max(size, ICON_SQUARE), min(size, ICON_SQUARE)
         if larger % smaller:
-            raise ValueError(f"icon size {size} is not an integer ratio of {LOGICAL}")
+            raise ValueError(
+                f"icon size {size} is not an integer ratio of {ICON_SQUARE}"
+            )
     return [source.resize((size, size), Image.NEAREST) for size in ICON_SIZES]
 
 
@@ -1351,8 +1444,13 @@ def metadata() -> dict[str, object]:
         # The row the feet rest on. The desktop companion subtracts it from the
         # canvas height to stand the character on the taskbar instead of
         # letting it sink behind it.
-        "ground_y": GROUND_Y,
-        "eye": {"width": EYE_WIDTH, "height": EYE_HEIGHT},
+        # Both consumers measure these against the emitted image, so they are
+        # published in raster pixels rather than in the authoring units the
+        # constants are written in - the desktop companion stands the
+        # character on the taskbar with ground_y, and draws its own eyes from
+        # this box.
+        "ground_y": GROUND_Y * SCALE,
+        "eye": {"width": _px(EYE_WIDTH), "height": _px(EYE_HEIGHT)},
         "clips": clips_meta,
         "frames": frames_meta,
         "palette": {key: list(value) for key, value in PALETTE.items()},
