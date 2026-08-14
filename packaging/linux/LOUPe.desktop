@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=LOUPe beta 0.1.4
+Name=LOUPe beta 0.1.5
 Comment=Débat multi-agents local avec modèles Ollama et GGUF
 Exec=3loop
 Icon=3loop
